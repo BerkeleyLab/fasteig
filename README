@@ -1,0 +1,42 @@
+1. modify the HOME macro in make.inc to point to where crd-fasteig is installed
+
+2. Define the locations of 
+   MKL
+   eigen
+
+3. Set compiler and compiler flags
+
+
+Then do
+
+make lib 
+
+to generate a libfasteig_$(PLAT).a where PLAT is a user defined Platform name, e.g., Perlmutter
+
+
+To run some examples
+
+
+cd examples
+
+make 
+
+generates an executable called 'runfasteig'
+
+Run the executable by the following command
+
+
+./runfasteig  SiO.input
+
+where SiO.input is an input file that contains a list of problem descriptions
+
+
+amatrix ./Sparse_Matrices/SiO.mtx
+logfile SiO
+nev     5
+which   SR
+solver  Chebyshev
+maxiter 10
+maxdim  20
+degree  8
+tol     1e-6

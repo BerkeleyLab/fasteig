@@ -1,0 +1,120 @@
+//********************************************************************************
+//
+//  Authors
+//    Dong Min Roh
+//    Chao Yang
+//    Applied Mathematics and Computational Research Division
+//    Lawrence Berkeley National Laboratory
+//
+//  Refactor notes (2025-12-30)
+//    - Introduces RAII-friendly parameter and input parsing classes.
+//    - Keeps a small C-compatible wrapper function signature: parseinput(char*, fasteig_param*).
+//    - Removes C-style heap management (malloc/free) from parseinput implementation.
+//
+//********************************************************************************
+
+#pragma once
+
+// Keep this header lean: configuration macros, Eigen aliases (VectorXd/MatrixXd),
+// and the operations struct come from fasteig.hpp.
+#include "fasteig.hpp"
+#include "fasteig_options.hpp"
+
+#include <memory>
+#include <optional>
+#include <string>
+
+void rmm_diis(const VectorXd v0,
+              const operations& ops,
+              FASTEIG_SIZET max_it,
+              VectorXd& eigvec,
+              FASTEIG_DOUBLE& eigval,
+              FASTEIG_DOUBLE tol);
+
+int chebyfsit(const operations& ops,
+              MatrixXd& V,
+              int maxiter,
+              int degree,
+              VectorXd& ritz_vals,
+              MatrixXd& ritz_vecs,
+              MatrixXd& residuals);
+
+void SPPC_Ind( const MatrixXd &V0,
+               const MatrixXd &L0,
+               const operations &ops,
+               int ns,
+               int m,
+               int P,
+               MatrixXd &X,
+               MatrixXd &EIGS,
+               MatrixXd &RESID,
+               FASTEIG_DOUBLE tol,
+               bool normalize = false );
+
+// =============================
+// Solver class hierarchy
+// =============================
+class fasteig_problem;
+
+namespace fasteig {
+
+class fasteig_solver {
+public:
+  virtual ~fasteig_solver() = default;
+  virtual FASTEIG_INT solve() = 0;
+
+  FASTEIG_INT status() const noexcept { return status_; }
+  std::optional<long long> iterations() const noexcept {
+    return (iterations_ >= 0) ? std::optional<long long>(iterations_) : std::nullopt;
+  }
+
+  static void RayleighRitz(const operations &ops,
+                           MatrixXd &V,
+                           VectorXd &Ritzvals,
+                           MatrixXd &Ritzvecs,
+                           MatrixXd &eigenvectors,
+                           MatrixXd &residuals);
+
+  static void RayleighRitz(const operations& ops,
+                           const Eigen::Ref<const MatrixXd>& V,
+                           FASTEIG_SIZET nev,
+                           std::string which,
+                           VectorXd& Ritzvals,
+                           MatrixXd& Ritzvecs,
+                           MatrixXd& residuals);
+
+protected:
+  fasteig_solver(::fasteig_problem& problem,
+                 const fasteig_options& options);
+  const operations& active_ops() const noexcept;
+  void compute_final_residual_norms();
+  void set_iterations(long long it) noexcept { iterations_ = it; }
+
+  ::fasteig_problem& problem_;
+  const operations& opsA_;
+  const operations& opsB_;
+  const operations& opsSAI_;
+  VectorXd& eigvals_;
+  VectorXd& resnrms_;
+  MatrixXd& eigvecs_;
+  fasteig_options options_;
+  FASTEIG_INT status_ = 0;
+  long long iterations_ = -1;
+};
+
+// Concrete solvers live in their own headers/cpps:
+//   include/*Solver.hpp + src/*Solver.cpp
+class BlockLanczosSolver;
+class KrylovSchurSolver;
+class DavidsonSolver;
+class LOBPCGSolver;
+class ChebyshevSolver;
+class SPPCSolver;
+class RMMDIISSolver;
+
+std::unique_ptr<fasteig_solver> make_fasteig_solver(const std::string& solver,
+                                                    ::fasteig_problem& problem,
+                                                    const fasteig_options& options);
+
+}  // namespace fasteig
+

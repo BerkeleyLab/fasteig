@@ -1,0 +1,18 @@
+amatrix SiO.fei
+#amatrix ./Sparse_Matrices/SiO.mtx
+logfile SiO
+output_format text
+
+# 1 prints run header + final eigenpairs table
+# 2 prints run header + per-iteration progress + final eigenpairs table
+verbosity 2
+
+# LOBPCG progress cadence (0 disables)
+print_every 5
+nev     5
+which   SR
+solver  Lanczos
+maxiter 200
+maxdim  10
+degree  8
+tol     1e-6

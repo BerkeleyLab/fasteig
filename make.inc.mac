@@ -1,0 +1,58 @@
+
+# macOS build configuration (local development)
+#
+# Usage:
+#   make MAKEINC=make.inc.mac
+#   make -C src MAKEINC=../make.inc.mac
+#   make -C examples MAKEINC=../make.inc.mac
+#
+# Prereqs:
+#   - Eigen headers installed (e.g. `brew install eigen`)
+#     Typical include path: /opt/homebrew/include/eigen3 (Apple Silicon)
+#                          /usr/local/include/eigen3    (Intel)
+
+# Repository root (works even when included from src/ or examples/)
+HOME := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+
+PLAT ?= Mac
+
+CXX ?= clang++
+CC  ?= clang
+MAKE ?= make
+
+AR     ?= ar
+ARFLAGS?= rcs
+RANLIB ?= ranlib
+ECHO   ?= echo
+
+# Eigen include root (should contain Eigen/Dense).
+EIGEN ?= /opt/homebrew/include/eigen3
+ifeq ($(wildcard $(EIGEN)/Eigen/Dense),)
+  EIGEN := /usr/local/include/eigen3
+endif
+
+# Optional OpenMP (recommended for performance).
+# Install with: `brew install libomp`
+LIBOMP_PREFIX ?= /opt/homebrew/opt/libomp
+ifeq ($(wildcard $(LIBOMP_PREFIX)/include/omp.h),)
+  LIBOMP_PREFIX := /usr/local/opt/libomp
+endif
+
+OMP_CXXFLAGS :=
+OMP_LDFLAGS  :=
+ifeq ($(wildcard $(LIBOMP_PREFIX)/include/omp.h),)
+  # OpenMP not found: build will still work, but runs single-threaded.
+else
+  OMP_CXXFLAGS := -Xpreprocessor -fopenmp -I$(LIBOMP_PREFIX)/include
+  OMP_LDFLAGS  := -L$(LIBOMP_PREFIX)/lib -lomp
+endif
+
+# Optional BLAS/LAPACK (empty by default).
+MKL    ?=
+LDFLAGS?=
+
+CXXFLAGS ?= -O3 -DNDEBUG -std=c++17 -I$(HOME)/include -I$(EIGEN) $(OMP_CXXFLAGS)
+LDFLAGS  += $(OMP_LDFLAGS)
+
+LIBFASTEIG = $(HOME)/libfasteig_$(PLAT).a
+

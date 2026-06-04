@@ -1,0 +1,33 @@
+
+#MKLROOT = /opt/intel/oneapi/mkl/2023.1.0
+#MKLROOT = "/c/Program Files (x86)/Intel/oneAPI/mkl/2025.3"
+MKLROOT = /c/Program\ Files\ \(x86\)/Intel/oneAPI/mkl/2025.3
+#MKL = -L${MKLROOT}/lib/intel64 -Wl,-rpath ${MKLROOT}/lib/intel64 -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core -lgomp -lpthread -lm -ldl
+
+#MKL = -m64  -L${MKLROOT}/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core -lgomp -lpthread -lm -ldl
+#MKL = -m64  -L${MKLROOT}/lib -Wl,-rpath,${MKLROOT}/bin -Wl,--no-as-needed -lmkl_rt -lgomp -lpthread -lm
+MKL = -m64 -L${MKLROOT}/lib -Wl,--no-as-needed -lmkl_rt -lpthread -lm
+HOME = /c/cygwin64/home/chaoa/crd-fasteig
+
+CXX = g++
+CC  = gcc
+
+PLAT = SurfacePro
+MAKE = /usr/bin/make
+
+# comment out the following line if not using MKL PARDISO for Sparse LDLT factorization and solves
+
+USE_MKL = -DEIGEN_USE_MKL_ALL
+CXXFLAGS =  $(USE_MKL) -O3 -I$(HOME)/include -I$(EIGEN) -I$(MKLROOT)/include -O3
+#CXXFLAGS =  -O3 -I$(HOME)/include -I$(EIGEN) -I$(MKLROOT)/include -O3
+LDFLAGS = 
+
+EIGEN = /c/cygwin64/home/chaoa/eigen-5.0.0
+
+LIBFASTEIG  = $(HOME)/libfasteig_$(PLAT).a
+
+RANLIB   = ranlib
+
+ECHO	 = echo
+
+AR = ar
