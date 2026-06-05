@@ -82,7 +82,7 @@ void fasteig_problem::prepare(const fasteig_options& opts) {
   }
 
   auto print_line = [&](const std::string& s) {
-    if (log_stream_) (*log_stream_) << s << "\n";
+    logger_.line(s);
     if (opts.verbosity() >= 1) std::cout << s << "\n";
   };
 
@@ -147,11 +147,22 @@ FASTEIG_INT fasteig_problem::solve() {
   return solve(opts);
 }
 
+void fasteig_problem::open_log(const fasteig_options& opts,
+                               const std::string& solver_name,
+                               bool append) {
+  std::string name = solver_name;
+  if (name.empty()) name = opts.solver().empty() ? solver_ : opts.solver();
+  if (name.empty()) name = "Lanczos";
+  set_log_path(opts.output_path(name), append);
+}
+
+void fasteig_problem::set_log_path(const std::string& path, bool append) {
+  logger_.open(path, append);
+}
+
 FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
   opts.validate();
   last_iterations_.reset();
-
-  prepare(opts);
 
   const FASTEIG_INT nev = opts.nev();
   const FASTEIG_INT n = n_;
@@ -181,6 +192,36 @@ FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
     throw std::invalid_argument("Generalized eigenproblems (bmatrix) are only supported by KrylovSchur for now.");
   }
 
+  const bool caller_provided_log = logger_.enabled();
+  if (!caller_provided_log) {
+    open_log(local, solver_name);
+  }
+
+  std::ostream* out = log_stream();
+  if (out) {
+    fasteig_print_matrix_summary(*out, *this);
+    fasteig_print_run_header(*out, local, solver_name);
+  }
+
+  const int verbosity = local.verbosity();
+  if (verbosity >= 1) {
+    fasteig_print_matrix_summary(std::cout, *this);
+    fasteig_print_run_header(std::cout, local, solver_name);
+  }
+
+  // Generalized setup (e.g., B factorization) should happen once before timing the eigensolver.
+  prepare(local);
+
+  if (out) {
+    logger_.section("PROGRESS");
+  }
+  if (verbosity >= 2) {
+    std::cout << "\n";
+    std::cout << "PROGRESS\n";
+    std::cout << "========\n";
+    std::cout << "\n";
+  }
+
   auto solver = fasteig::make_fasteig_solver(solver_name, *this, local);
   if (!solver) {
     if (solver_name.rfind("auto", 0) == 0) {
@@ -188,10 +229,51 @@ FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
     } else {
       status_ = -1;
     }
+    if (!caller_provided_log) close_log();
     return status_;
   }
+
+  const auto t0 = std::chrono::steady_clock::now();
   status_ = solver->solve();
+  const auto t1 = std::chrono::steady_clock::now();
+  const double runtime_sec = std::chrono::duration<double>(t1 - t0).count();
   last_iterations_ = solver->iterations();
+
+  resnrms_ = fasteig_compute_residual_norms(opsA_,
+                                            B_ ? &opsB_ : nullptr,
+                                            eigvals_,
+                                            eigvecs_);
+
+  if (out) {
+    fasteig_write_results_text(*out, status_, eigvals_, resnrms_,
+                               b_factorization_sec_, runtime_sec, last_iterations_);
+    logger_.flush();
+  }
+
+  if (verbosity >= 1) {
+    std::cout << "\n";
+    std::cout << "FINAL RESULTS\n";
+    std::cout << "=============\n";
+    std::cout << "\n";
+    fasteig_print_eigenpairs_table(std::cout, eigvals_, resnrms_);
+    std::cout << "\n";
+
+    std::cout << "DIAGNOSTICS\n";
+    std::cout << "===========\n";
+    std::cout << "\n";
+    if (last_iterations_.has_value()) {
+      std::cout << "  Iterations           : " << *last_iterations_ << "\n";
+    }
+    if (b_factorization_sec_.has_value()) {
+      std::cout << "  B Factorization (sec): " << std::fixed << std::setprecision(6)
+                << *b_factorization_sec_ << "\n";
+    }
+    std::cout << "  Runtime (sec)        : " << std::fixed << std::setprecision(6)
+              << runtime_sec << "\n";
+    std::cout << "\n";
+  }
+
+  if (!caller_provided_log) close_log();
   return status_;
 }
 
@@ -449,4 +531,3 @@ void fasteig_problem::build_default_ops_from_B(operations& target_ops) {
     target_ops.block_matvec = [this](const MatrixXd& V, MatrixXd& AV) { AV.noalias() = (*B_) * V; };
   }
 }
-

@@ -1,7 +1,7 @@
 #include "KrylovSchurSolver.hpp"
 
 #include "fasteig_problem.hpp"
-#include "print_util.hpp"
+#include "fasteig_logger.hpp"
 
 #include <cmath>
 #include <limits>
@@ -342,4 +342,3 @@ FASTEIG_INT KrylovSchurSolver::solve() {
 }
 
 }  // namespace fasteig
-

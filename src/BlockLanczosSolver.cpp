@@ -1,7 +1,7 @@
 #include "BlockLanczosSolver.hpp"
 
 #include "fasteig_problem.hpp"
-#include "print_util.hpp"
+#include "fasteig_logger.hpp"
 
 #include <algorithm>
 #include <cctype>

@@ -12,7 +12,6 @@
 #include "SPPCSolver.hpp"
 
 #include "fasteig_problem.hpp"
-#include "fasteig_result_io.hpp"
 
 namespace fasteig {
 namespace {
@@ -46,6 +45,71 @@ MatrixXd apply_block_matvec_fallback(const operations& ops, const Eigen::Ref<con
 
 }  // namespace
 
+}  // namespace fasteig
+
+VectorXd fasteig_compute_residual_norms(const operations& ops,
+                                        const VectorXd& eigvals,
+                                        const MatrixXd& eigvecs) {
+  return fasteig_compute_residual_norms(ops, /*opsB=*/nullptr, eigvals, eigvecs);
+}
+
+VectorXd fasteig_compute_residual_norms(const operations& opsA,
+                                        const operations* opsB,
+                                        const VectorXd& eigvals,
+                                        const MatrixXd& eigvecs) {
+  const int nev = static_cast<int>(eigvals.size());
+  if (eigvecs.cols() < nev) {
+    throw std::invalid_argument("fasteig_compute_residual_norms: eigvecs has fewer columns than eigvals.");
+  }
+  if (!opsA.matvec && !opsA.block_matvec) {
+    throw std::invalid_argument("fasteig_compute_residual_norms: opsA has no matvec or block_matvec.");
+  }
+
+  VectorXd residuals(nev);
+  VectorXd av(eigvecs.rows());
+  VectorXd bv(eigvecs.rows());
+
+  for (int i = 0; i < nev; ++i) {
+    const auto v = eigvecs.col(i);
+    if (opsA.matvec) {
+      opsA.matvec(v, av);
+    } else {
+      MatrixXd V(v.rows(), 1);
+      V.col(0) = v;
+      MatrixXd AV(v.rows(), 1);
+      opsA.block_matvec(V, AV);
+      av = AV.col(0);
+    }
+
+    if (opsB && opsB->matvec) {
+      opsB->matvec(v, bv);
+      const double num = (av - eigvals(i) * bv).norm();
+      const double denom = (1.0 + std::abs(eigvals(i))) * bv.norm();
+      residuals(i) = (denom > 0.0) ? (num / denom) : num;
+    } else {
+      const double num = (av - eigvals(i) * v).norm();
+      const double denom = (1.0 + std::abs(eigvals(i))) * v.norm();
+      residuals(i) = (denom > 0.0) ? (num / denom) : num;
+    }
+  }
+  return residuals;
+}
+
+VectorXd fasteig_compute_resnormual_norms(const operations& ops,
+                                          const VectorXd& eigvals,
+                                          const MatrixXd& eigvecs) {
+  return fasteig_compute_residual_norms(ops, eigvals, eigvecs);
+}
+
+VectorXd fasteig_compute_resnormual_norms(const operations& opsA,
+                                          const operations* opsB,
+                                          const VectorXd& eigvals,
+                                          const MatrixXd& eigvecs) {
+  return fasteig_compute_residual_norms(opsA, opsB, eigvals, eigvecs);
+}
+
+namespace fasteig {
+
 fasteig_solver::fasteig_solver(::fasteig_problem& problem,
                                const fasteig_options& options)
     : problem_(problem),
@@ -63,6 +127,10 @@ const operations& fasteig_solver::active_ops() const noexcept {
 
 void fasteig_solver::compute_final_residual_norms() {
   resnrms_ = fasteig_compute_residual_norms(opsA_, eigvals_, eigvecs_);
+}
+
+void fasteig_solver::compute_final_resnormual_norms() {
+  compute_final_residual_norms();
 }
 
 std::unique_ptr<fasteig_solver> make_fasteig_solver(const std::string& solver,
@@ -186,4 +254,3 @@ void fasteig_solver::RayleighRitz(const operations& ops,
 }
 
 }  // namespace fasteig
-

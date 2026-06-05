@@ -46,7 +46,7 @@ private:
   MatrixXd StS;                  // Overlap matrix S'S, size 3b x 3b
   MatrixXd C;                    // Ritz Coefficients, size 3b x 2b
 
-  // Residual norms
+  // resnormual norms
   VectorXd resnorms;
 
   // Eigensolver for orthogonalization and RR step.
@@ -55,7 +55,7 @@ private:
   // Number of converged eigenpairs
   int b_conv = 0;
 
-  // Flag. Sets whether to orthogonalize preconditioned residuals W w.r.t. [X, P]
+  // Flag. Sets whether to orthogonalize preconditioned resnormuals W w.r.t. [X, P]
   bool use_orth = false;
 
   // Convergence logging

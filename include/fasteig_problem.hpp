@@ -1,6 +1,7 @@
 #pragma once
 
 #include "fasteig.hpp"
+#include "fasteig_logger.hpp"
 #include "fasteig_options.hpp"
 #include "fasteig_solver.hpp"
 
@@ -32,6 +33,8 @@ public:
   // Results access
   VectorXd& eigenvalues() noexcept { return eigvals_; }
   const VectorXd& eigenvalues() const noexcept { return eigvals_; }
+  VectorXd& resnormual_norms() noexcept { return resnrms_; }
+  const VectorXd& resnormual_norms() const noexcept { return resnrms_; }
   VectorXd& residual_norms() noexcept { return resnrms_; }
   const VectorXd& residual_norms() const noexcept { return resnrms_; }
   MatrixXd& eigenvectors() noexcept { return eigvecs_; }
@@ -62,9 +65,15 @@ public:
   void prepare(const fasteig_options& opts);
   std::optional<double> b_factorization_sec() const noexcept { return b_factorization_sec_; }
 
-  // Logging/progress output stream (non-owning).
-  void set_log_stream(std::ostream* os) noexcept { log_stream_ = os; }
-  std::ostream* log_stream() const noexcept { return log_stream_; }
+  // Logging/progress output.
+  void open_log(const fasteig_options& opts, const std::string& solver_name = std::string(), bool append = false);
+  void set_log_path(const std::string& path, bool append = false);
+  void set_log_stream(std::ostream* os) noexcept { logger_.attach(os); }
+  void close_log() { logger_.close(); }
+  fasteig_logger& logger() noexcept { return logger_; }
+  const fasteig_logger& logger() const noexcept { return logger_; }
+  std::ostream* log_stream() noexcept { return logger_.stream(); }
+  std::ostream* log_stream() const noexcept { return const_cast<fasteig_logger&>(logger_).stream(); }
 
   // Best-effort iteration count from the most recent solve().
   std::optional<long long> last_iterations() const noexcept { return last_iterations_; }
@@ -123,7 +132,6 @@ private:
   MatrixXd eigvecs_;
   FASTEIG_INT status_ = 0;
 
-  std::ostream* log_stream_ = nullptr;
+  fasteig_logger logger_;
   std::optional<long long> last_iterations_;
 };
-

@@ -9,9 +9,9 @@ $(BUILD_TAG_FILE):
 	@cmp -s $@ $@.tmp 2>/dev/null && rm -f $@.tmp || mv $@.tmp $@
 
 #DMR
-OBJS  = KrylovSubspace.o mmio.o getevbounds.o chebfsit.o rmmdiis.o file_reader.o SPPC_Ind.o CholeskyQR.o Display2Vecs.o parseinput.o CreateMatrix.o fasteig_solver.o LanczosSolver.o BlockLanczosSolver.o KrylovSchurSolver.o DavidsonSolver.o LOBPCGSolver.o ChebyshevSolver.o SPPCSolver.o RMMDIISSolver.o fasteig_options.o fasteig_problem.o fasteig_result_io.o print_util.o ortho.o ReadMatrix.o
+OBJS  = KrylovSubspace.o mmio.o getevbounds.o chebfsit.o rmmdiis.o file_reader.o SPPC_Ind.o CholeskyQR.o Display2Vecs.o parseinput.o CreateMatrix.o fasteig_solver.o LanczosSolver.o BlockLanczosSolver.o KrylovSchurSolver.o DavidsonSolver.o LOBPCGSolver.o ChebyshevSolver.o SPPCSolver.o RMMDIISSolver.o fasteig_options.o fasteig_problem.o fasteig_logger.o ortho.o ReadMatrix.o
 
-#OBJS  = KrylovSubspace.o krylov_schur.o mmio.o getevbounds.o chebfsit.o rmmdiis.o file_reader.o SPPC_Ind.o CholeskyQR.o Davidson.o Display2Vecs.o parseinput.o CreateMatrix.o fasteig_solver.o LanczosSolver.o fasteig_options.o LOBPCG.o print_util.o ortho.o
+#OBJS  = KrylovSubspace.o krylov_schur.o mmio.o getevbounds.o chebfsit.o rmmdiis.o file_reader.o SPPC_Ind.o CholeskyQR.o Display2Vecs.o parseinput.o CreateMatrix.o fasteig_solver.o LanczosSolver.o fasteig_options.o LOBPCG.o ortho.o
 
 # Auto-generate header dependencies (.d files) so edits to headers trigger rebuilds.
 DEPFLAGS ?= -MMD -MP
