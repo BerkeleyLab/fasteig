@@ -199,14 +199,18 @@ FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
 
   std::ostream* out = log_stream();
   if (out) {
-    fasteig_print_matrix_summary(*out, *this);
-    fasteig_print_run_header(*out, local, solver_name);
+    logger_.print_matrix_summary(*this);
+    logger_.print_run_header(local, solver_name);
   }
 
   const int verbosity = local.verbosity();
+  fasteig_logger stdout_logger;
   if (verbosity >= 1) {
-    fasteig_print_matrix_summary(std::cout, *this);
-    fasteig_print_run_header(std::cout, local, solver_name);
+    stdout_logger.attach(&std::cout);
+  }
+  if (verbosity >= 1) {
+    stdout_logger.print_matrix_summary(*this);
+    stdout_logger.print_run_header(local, solver_name);
   }
 
   // Generalized setup (e.g., B factorization) should happen once before timing the eigensolver.
@@ -216,10 +220,7 @@ FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
     logger_.section("PROGRESS");
   }
   if (verbosity >= 2) {
-    std::cout << "\n";
-    std::cout << "PROGRESS\n";
-    std::cout << "========\n";
-    std::cout << "\n";
+    stdout_logger.section("PROGRESS");
   }
 
   auto solver = fasteig::make_fasteig_solver(solver_name, *this, local);
@@ -245,32 +246,14 @@ FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
                                             eigvecs_);
 
   if (out) {
-    fasteig_write_results_text(*out, status_, eigvals_, resnrms_,
+    logger_.write_results_text(status_, eigvals_, resnrms_,
                                b_factorization_sec_, runtime_sec, last_iterations_);
     logger_.flush();
   }
 
   if (verbosity >= 1) {
-    std::cout << "\n";
-    std::cout << "FINAL RESULTS\n";
-    std::cout << "=============\n";
-    std::cout << "\n";
-    fasteig_print_eigenpairs_table(std::cout, eigvals_, resnrms_);
-    std::cout << "\n";
-
-    std::cout << "DIAGNOSTICS\n";
-    std::cout << "===========\n";
-    std::cout << "\n";
-    if (last_iterations_.has_value()) {
-      std::cout << "  Iterations           : " << *last_iterations_ << "\n";
-    }
-    if (b_factorization_sec_.has_value()) {
-      std::cout << "  B Factorization (sec): " << std::fixed << std::setprecision(6)
-                << *b_factorization_sec_ << "\n";
-    }
-    std::cout << "  Runtime (sec)        : " << std::fixed << std::setprecision(6)
-              << runtime_sec << "\n";
-    std::cout << "\n";
+    stdout_logger.print_final_results(status_, eigvals_, resnrms_,
+                                      b_factorization_sec_, runtime_sec, last_iterations_);
   }
 
   if (!caller_provided_log) close_log();

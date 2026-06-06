@@ -56,6 +56,8 @@ FASTEIG_INT BlockLanczosSolver::solve() {
   // print_every is intentionally ignored for BlockLanczos:
   // if verbosity==2, emit a snapshot every block iteration (one block matvec).
   std::ostream* log = problem_.log_stream();
+  fasteig_logger stdout_logger;
+  if (verbosity >= 2) stdout_logger.attach(&std::cout);
 
   // Basis blocks Q_0..Q_maxiter (Q_maxiter exists to form beta for the last snapshot).
   // Use the driver's initial block when provided (options_.v0 is initialized by the driver)
@@ -135,10 +137,10 @@ FASTEIG_INT BlockLanczosSolver::solve() {
     if (snap.lam.size() == 0) return;
 
     if (log) {
-      print_convergence_data(2, *log, snap.lam, snap.rel_res, iter_blocks);
+      problem_.logger().print_convergence_data(snap.lam, snap.rel_res, iter_blocks);
     }
     if (verbosity >= 2) {
-      print_convergence_data(1, std::cout, snap.lam, snap.rel_res, iter_blocks);
+      stdout_logger.print_convergence_data(snap.lam, snap.rel_res, iter_blocks);
     }
   };
 

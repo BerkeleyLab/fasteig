@@ -147,6 +147,8 @@ FASTEIG_INT KrylovSchurSolver::solve() {
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
   std::ostream* log = (print_every > 0) ? problem_.log_stream() : nullptr;
+  fasteig_logger stdout_logger;
+  if (verbosity >= 2) stdout_logger.attach(&std::cout);
 
   MatrixXd Q(n_sz, static_cast<int>(k));
   MatrixXd H(static_cast<int>(k), static_cast<int>(k));
@@ -224,10 +226,10 @@ FASTEIG_INT KrylovSchurSolver::solve() {
     const bool do_progress = (print_every > 0) && (((i + 1) % static_cast<size_t>(print_every)) == 0);
     if (do_progress) {
       if (log) {
-        print_convergence_data(2, *log, lam_iter, res_iter, static_cast<int>(i + 1));
+        problem_.logger().print_convergence_data(lam_iter, res_iter, static_cast<int>(i + 1));
       }
       if (verbosity >= 2) {
-        print_convergence_data(1, std::cout, lam_iter, res_iter, static_cast<int>(i + 1));
+        stdout_logger.print_convergence_data(lam_iter, res_iter, static_cast<int>(i + 1));
       }
     }
 
@@ -241,10 +243,10 @@ FASTEIG_INT KrylovSchurSolver::solve() {
 
       if (print_every > 0 && !do_progress) {
         if (log) {
-          print_convergence_data(2, *log, lam_iter, res_iter, static_cast<int>(i + 1));
+          problem_.logger().print_convergence_data(lam_iter, res_iter, static_cast<int>(i + 1));
         }
         if (verbosity >= 2) {
-          print_convergence_data(1, std::cout, lam_iter, res_iter, static_cast<int>(i + 1));
+          stdout_logger.print_convergence_data(lam_iter, res_iter, static_cast<int>(i + 1));
         }
       }
       compute_final_residual_norms();
@@ -307,10 +309,10 @@ FASTEIG_INT KrylovSchurSolver::solve() {
       }
       if (print_every > 0 && !do_progress) {
         if (log) {
-          print_convergence_data(2, *log, lam_final, res_final, static_cast<int>(i + 1));
+          problem_.logger().print_convergence_data(lam_final, res_final, static_cast<int>(i + 1));
         }
         if (verbosity >= 2) {
-          print_convergence_data(1, std::cout, lam_final, res_final, static_cast<int>(i + 1));
+          stdout_logger.print_convergence_data(lam_final, res_final, static_cast<int>(i + 1));
         }
       }
       for (size_t j = 0; j < nev0; ++j) {

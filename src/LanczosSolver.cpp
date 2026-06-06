@@ -44,6 +44,8 @@ FASTEIG_INT LanczosSolver::solve() {
   }
 
   std::ostream* log = (print_every > 0) ? problem_.log_stream() : nullptr;
+  fasteig_logger stdout_logger;
+  if (verbosity >= 2) stdout_logger.attach(&std::cout);
 
   // Use the first initial vector (options_.v0 is initialized by the driver).
   VectorXd f;
@@ -117,10 +119,10 @@ FASTEIG_INT LanczosSolver::solve() {
 
   auto emit_snapshot = [&](const Snapshot& s, FASTEIG_INT iter_label) {
     if (log) {
-      print_convergence_data(2, *log, s.lam, s.rel_res, static_cast<int>(iter_label));
+      problem_.logger().print_convergence_data(s.lam, s.rel_res, static_cast<int>(iter_label));
     }
     if (verbosity >= 2) {
-      print_convergence_data(1, std::cout, s.lam, s.rel_res, static_cast<int>(iter_label));
+      stdout_logger.print_convergence_data(s.lam, s.rel_res, static_cast<int>(iter_label));
     }
   };
 

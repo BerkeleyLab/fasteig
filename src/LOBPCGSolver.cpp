@@ -89,6 +89,8 @@ FASTEIG_INT LOBPCGSolver::solve() {
 
   std::ostream* log = problem_.log_stream();
   reset_state(tol, orth_tol, verbosity, print_every, log);
+  fasteig_logger stdout_logger;
+  if (verbose >= 2) stdout_logger.attach(&std::cout);
 
   for (int i = 0; i < maxiter; ++i) {
       /*
@@ -99,8 +101,8 @@ FASTEIG_INT LOBPCGSolver::solve() {
       -----------------------------------------------------------------
       */
       if (iter == -1)  {
-          if (log) print_progress_note(2, *log, "Initializing subspaces", -1);
-          if (verbose >= 2) print_progress_note(1, std::cout, "Initializing subspaces", -1);
+          if (log) problem_.logger().print_progress_note("Initializing subspaces", -1);
+          if (verbose >= 2) stdout_logger.print_progress_note("Initializing subspaces", -1);
           this->initialize_XP_subspaces();
           iter++;
       }
@@ -142,8 +144,8 @@ FASTEIG_INT LOBPCGSolver::solve() {
       if (!use_orth && needs_orth) {
           // Orthogonalizing W against [X P]
           string orth_message = "Orthogonalizing W";
-          if (log) print_progress_note(2, *log, orth_message, k+1);
-          if (verbose >= 2) print_progress_note(1, std::cout, orth_message, k+1);
+          if (log) problem_.logger().print_progress_note(orth_message, k+1);
+          if (verbose >= 2) stdout_logger.print_progress_note(orth_message, k+1);
           ortho(W, XP, orth_tol, eigsolver);
           // Recompute AW
           ops_.block_matvec(W, AW);
@@ -182,11 +184,11 @@ FASTEIG_INT LOBPCGSolver::solve() {
       if (do_progress) {
           // Always write progress to file if a log stream is provided.
           if (log) {
-              print_convergence_data(2, *log, lam, resnorms, k + 1);
+              problem_.logger().print_convergence_data(lam, resnorms, k + 1);
           }
           // Optionally print progress to stdout based on verbosity.
           if (verbose >= 2) {
-              print_convergence_data(1, std::cout, lam, resnorms, k + 1);
+              stdout_logger.print_convergence_data(lam, resnorms, k + 1);
           }
       }
 
@@ -307,8 +309,12 @@ void LOBPCGSolver::lock_eigenvectors() {
 
         // Progress note about locking eigenvectors
         for (int l = 0; l < lock; l++) {
-            if (log) print_locking_note(2, *log, b_conv+1+l, iter+1);
-            if (verbose >= 2) print_locking_note(1, std::cout, b_conv+1+l, iter+1);
+            if (log) problem_.logger().print_locking_note(b_conv+1+l, iter+1);
+            if (verbose >= 2) {
+                fasteig_logger stdout_logger;
+                stdout_logger.attach(&std::cout);
+                stdout_logger.print_locking_note(b_conv+1+l, iter+1);
+            }
         }
 
         // Discard columns of P and W corresponding to locked eigenpairs.
