@@ -153,9 +153,9 @@ FASTEIG_INT BlockLanczosSolver::solve() {
   Snapshot final;
   for (int iter = 1; iter <= max_blocks; ++iter) {
     if (iter == 1) {
-      KrylovSubspace(V0, Q, T, ops, /*begin=*/0, /*end=*/1, beta);
+      KrylovSubspace::build(V0, Q, T, ops, /*begin=*/0, /*end=*/1, beta);
     } else {
-      KrylovSubspace(V0, Q, T, ops, static_cast<size_t>(iter - 1), static_cast<size_t>(iter), beta);
+      KrylovSubspace::build(V0, Q, T, ops, static_cast<size_t>(iter - 1), static_cast<size_t>(iter), beta);
     }
 
     // Always compute/check convergence once the subspace is large enough to represent nev.

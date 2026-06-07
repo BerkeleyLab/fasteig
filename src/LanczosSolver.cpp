@@ -135,7 +135,7 @@ FASTEIG_INT LanczosSolver::solve() {
     // Build the Krylov basis incrementally to preserve KrylovSubspace's expected
     // boundary behavior across algorithms (e.g., Krylov-Schur restarts).
     const operations& ops_to_use = (which == "sai") ? opsSAI_ : opsA_;
-    KrylovSubspace(f, V, T, ops_to_use, static_cast<size_t>(it), static_cast<size_t>(it + 1));
+    KrylovSubspace::build(f, V, T, ops_to_use, static_cast<size_t>(it), static_cast<size_t>(it + 1));
 
     const FASTEIG_INT m = it + 1;
     const FASTEIG_DOUBLE beta_next = f.norm();

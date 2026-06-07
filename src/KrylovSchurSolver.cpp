@@ -167,10 +167,10 @@ FASTEIG_INT KrylovSchurSolver::solve() {
   }
 
   if (which_lower == "sai") {
-    KrylovSubspace(f, Q, H, opsSAI_, 0, k);
+    KrylovSubspace::build(f, Q, H, opsSAI_, 0, k);
     sai = 1;
   } else if (!generalized) {
-    KrylovSubspace(f, Q, H, opsA_, 0, k);
+    KrylovSubspace::build(f, Q, H, opsA_, 0, k);
   } else {
     BQ.resize(static_cast<int>(n_sz), static_cast<int>(k));
     BQ.setZero();
@@ -325,9 +325,9 @@ FASTEIG_INT KrylovSchurSolver::solve() {
     }
 
     if (which_lower == "sai") {
-      KrylovSubspace(f, Q, H, opsSAI_, current_nev, k);
+      KrylovSubspace::build(f, Q, H, opsSAI_, current_nev, k);
     } else if (!generalized) {
-      KrylovSubspace(f, Q, H, opsA_, current_nev, k);
+      KrylovSubspace::build(f, Q, H, opsA_, current_nev, k);
     } else {
       // Update cached BQ for the restarted basis before expansion.
       if (!opsB_.block_matvec) {

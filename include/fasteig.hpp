@@ -245,11 +245,6 @@ private:
 // NOTE: This is still C++ (it returns/accepts C types), but avoids forcing a rewrite elsewhere.
 extern "C" FASTEIG_INT parseinput(char* fname, fasteig_params* params);
 
-void getevbounds(int n,
-                 const operations& ops,
-                 FASTEIG_DOUBLE& evlb,
-                 FASTEIG_DOUBLE& evub);
-
 FASTEIG_INT CholeskyQR(MatrixXd &X, MatrixXd &Q, MatrixXd &R);
 
 void Display2Vecs(const Eigen::VectorXd& vec1,
@@ -261,22 +256,30 @@ void Display2Vecs(const Eigen::VectorXd& vec1,
 // =============================
 // Krylov subspace helpers
 // =============================
-// Vector version (Lanczos): uses ops.matvec
-void KrylovSubspace(VectorXd& f,
+class KrylovSubspace {
+public:
+  static void getevbounds(FASTEIG_INT n,
+                          const operations& ops,
+                          FASTEIG_DOUBLE& evlb,
+                          FASTEIG_DOUBLE& evub);
+
+  // Vector version (Lanczos): uses ops.matvec
+  static void build(VectorXd& f,
                     MatrixXd& Q,
                     MatrixXd& T,
                     const operations& ops,
                     FASTEIG_SIZET begin,
                     FASTEIG_SIZET end);
 
-// Block version (block Lanczos): uses ops.block_matvec
-void KrylovSubspace(const MatrixXd& V0,
+  // Block version (block Lanczos): uses ops.block_matvec
+  static void build(const MatrixXd& V0,
                     MatrixXd& Q,
                     MatrixXd& T,
                     const operations& ops,
                     FASTEIG_SIZET begin,
                     FASTEIG_SIZET end,
                     MatrixXd& beta);
+};
 
 bool readRSA(const std::string& filename,
              FASTEIG_INT &nRows,
@@ -327,4 +330,3 @@ std::vector<size_t> sort_indices( const T &v, std::string which ) {
 
   return idx;
 };
-

@@ -6,12 +6,12 @@
 // - Vector version (Lanczos): uses ops.matvec
 // - Block version (Block Lanczos): uses ops.block_matvec
 
-void KrylovSubspace(VectorXd& f,
-                    MatrixXd& Q,
-                    MatrixXd& T,
-                    const operations& ops,
-                    size_t begin,
-                    size_t end) {
+void KrylovSubspace::build(VectorXd& f,
+                           MatrixXd& Q,
+                           MatrixXd& T,
+                           const operations& ops,
+                           size_t begin,
+                           size_t end) {
   const size_t n = f.size();
 
   if (end == 0) throw std::runtime_error("Requested Krylov subspace of dim 0 in KrylovSubspace");
@@ -65,13 +65,13 @@ void KrylovSubspace(VectorXd& f,
   }
 }
 
-void KrylovSubspace(const MatrixXd& V0,
-                    MatrixXd& Q,
-                    MatrixXd& T,
-                    const operations& ops,
-                    size_t begin,
-                    size_t end,
-                    MatrixXd& beta) {
+void KrylovSubspace::build(const MatrixXd& V0,
+                           MatrixXd& Q,
+                           MatrixXd& T,
+                           const operations& ops,
+                           size_t begin,
+                           size_t end,
+                           MatrixXd& beta) {
   const size_t n = V0.rows();
   const size_t b = V0.cols();
 
@@ -113,3 +113,35 @@ void KrylovSubspace(const MatrixXd& V0,
   }
 }
 
+void KrylovSubspace::getevbounds(int n,
+                                 const operations& ops,
+                                 double& evlb,
+                                 double& evub) {
+  constexpr int k = 20; // number of Lanczos iterations, hard coded for now
+
+  MatrixXd Q(n, k);
+  MatrixXd H(k, k);
+  VectorXd v0 = Eigen::VectorXd::Random(n);
+
+  H.setZero();
+
+  build(v0, Q, H, ops, 0, k);
+
+  const double beta = v0.norm();
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(H.block(0, 0, k, k));
+
+  const VectorXd eigenvalues = solver.eigenvalues();
+  const MatrixXd eigenvectors = solver.eigenvectors();
+
+  evlb = std::numeric_limits<double>::infinity();
+  evub = -std::numeric_limits<double>::infinity();
+
+  for (int j = 0; j < k; j++) {
+    const double t = std::fabs(beta * eigenvectors(k - 1, j));
+    double x = eigenvalues(j) - t;
+    if (x < evlb) evlb = x;
+
+    x = eigenvalues(j) + t;
+    if (x > evub) evub = x;
+  }
+}

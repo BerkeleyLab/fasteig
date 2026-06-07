@@ -31,14 +31,6 @@ void rmm_diis(const VectorXd v0,
               FASTEIG_DOUBLE& eigval,
               FASTEIG_DOUBLE tol);
 
-int chebyfsit(const operations& ops,
-              MatrixXd& V,
-              int maxiter,
-              int degree,
-              VectorXd& ritz_vals,
-              MatrixXd& ritz_vecs,
-              MatrixXd& resnormuals);
-
 void SPPC_Ind( const MatrixXd &V0,
                const MatrixXd &L0,
                const operations &ops,
