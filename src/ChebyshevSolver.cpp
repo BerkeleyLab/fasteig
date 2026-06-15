@@ -1,5 +1,6 @@
 #include "ChebyshevSolver.hpp"
 
+#include "KrylovSubspace.hpp"
 #include "fasteig_problem.hpp"
 
 #include <algorithm>

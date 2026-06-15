@@ -1,5 +1,6 @@
 #include "LanczosSolver.hpp"
 
+#include "KrylovSubspace.hpp"
 #include "fasteig_problem.hpp"
 #include "fasteig_logger.hpp"
 

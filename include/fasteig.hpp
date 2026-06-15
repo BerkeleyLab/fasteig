@@ -253,8 +253,6 @@ void Display2Vecs(const Eigen::VectorXd& vec1,
                   const std::string& label2,
                   int precision);
 
-#include "KrylovSubspace.hpp"
-
 bool readRSA(const std::string& filename,
              FASTEIG_INT &nRows,
              FASTEIG_INT &nCols,
@@ -304,3 +302,4 @@ std::vector<size_t> sort_indices( const T &v, std::string which ) {
 
   return idx;
 };
+
