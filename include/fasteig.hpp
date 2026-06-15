@@ -253,33 +253,7 @@ void Display2Vecs(const Eigen::VectorXd& vec1,
                   const std::string& label2,
                   int precision);
 
-// =============================
-// Krylov subspace helpers
-// =============================
-class KrylovSubspace {
-public:
-  static void getevbounds(FASTEIG_INT n,
-                          const operations& ops,
-                          FASTEIG_DOUBLE& evlb,
-                          FASTEIG_DOUBLE& evub);
-
-  // Vector version (Lanczos): uses ops.matvec
-  static void build(VectorXd& f,
-                    MatrixXd& Q,
-                    MatrixXd& T,
-                    const operations& ops,
-                    FASTEIG_SIZET begin,
-                    FASTEIG_SIZET end);
-
-  // Block version (block Lanczos): uses ops.block_matvec
-  static void build(const MatrixXd& V0,
-                    MatrixXd& Q,
-                    MatrixXd& T,
-                    const operations& ops,
-                    FASTEIG_SIZET begin,
-                    FASTEIG_SIZET end,
-                    MatrixXd& beta);
-};
+#include "KrylovSubspace.hpp"
 
 bool readRSA(const std::string& filename,
              FASTEIG_INT &nRows,

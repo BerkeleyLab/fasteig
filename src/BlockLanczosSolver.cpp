@@ -151,12 +151,16 @@ FASTEIG_INT BlockLanczosSolver::solve() {
   int it_stop = max_blocks;
   int last_emitted_iter = 0;
   Snapshot final;
+  KrylovSubspace krylov(V0, Q, T, beta);
   for (int iter = 1; iter <= max_blocks; ++iter) {
     if (iter == 1) {
-      KrylovSubspace::build(V0, Q, T, ops, /*begin=*/0, /*end=*/1, beta);
+      krylov.build_block(ops, /*begin=*/0, /*end=*/1);
     } else {
-      KrylovSubspace::build(V0, Q, T, ops, static_cast<size_t>(iter - 1), static_cast<size_t>(iter), beta);
+      krylov.build_block(ops, static_cast<size_t>(iter - 1), static_cast<size_t>(iter));
     }
+    Q = krylov.OrthoBasis();
+    T = krylov.ProjectedMatrix();
+    beta = krylov.beta();
 
     // Always compute/check convergence once the subspace is large enough to represent nev.
     const bool do_check = (iter * b >= static_cast<int>(nev));

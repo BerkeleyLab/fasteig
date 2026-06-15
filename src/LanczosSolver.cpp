@@ -130,12 +130,16 @@ FASTEIG_INT LanczosSolver::solve() {
   FASTEIG_INT it_stop = maxiter;
   FASTEIG_INT last_emitted_iter = 0;
   Snapshot final;
+  KrylovSubspace krylov(f, V, T);
 
   for (FASTEIG_INT it = 0; it < maxiter; ++it) {
     // Build the Krylov basis incrementally to preserve KrylovSubspace's expected
     // boundary behavior across algorithms (e.g., Krylov-Schur restarts).
     const operations& ops_to_use = (which == "sai") ? opsSAI_ : opsA_;
-    KrylovSubspace::build(f, V, T, ops_to_use, static_cast<size_t>(it), static_cast<size_t>(it + 1));
+    krylov.build(ops_to_use, static_cast<size_t>(it), static_cast<size_t>(it + 1));
+    f = krylov.KrylovResidual();
+    V = krylov.OrthoBasis();
+    T = krylov.ProjectedMatrix();
 
     const FASTEIG_INT m = it + 1;
     const FASTEIG_DOUBLE beta_next = f.norm();
