@@ -15,6 +15,12 @@
 
 class fasteig_problem {
 public:
+  struct CsrMatrixData {
+    std::vector<int> rowptr;
+    std::vector<int> colind;
+    std::vector<double> values;
+  };
+
   // Construct from an existing sparse matrix
   explicit fasteig_problem(SpMat H, std::string solver = "Lanczos");
 
@@ -33,8 +39,6 @@ public:
   // Results access
   VectorXd& eigenvalues() noexcept { return eigvals_; }
   const VectorXd& eigenvalues() const noexcept { return eigvals_; }
-  VectorXd& resnormual_norms() noexcept { return resnrms_; }
-  const VectorXd& resnormual_norms() const noexcept { return resnrms_; }
   VectorXd& residual_norms() noexcept { return resnrms_; }
   const VectorXd& residual_norms() const noexcept { return resnrms_; }
   MatrixXd& eigenvectors() noexcept { return eigvecs_; }
@@ -57,6 +61,7 @@ public:
   const operations& solver_ops(const fasteig_options& opts) const noexcept;
 
   const SpMat* matrix() const noexcept { return H_.has_value() ? &(*H_) : nullptr; }
+  const CsrMatrixData* csr_matrix() const noexcept { return csrA_.has_value() ? &(*csrA_) : nullptr; }
   const SpMat* bmatrix() const noexcept { return B_.has_value() ? &(*B_) : nullptr; }
   const fasteig_params* params() const noexcept { return params_.has_value() ? &params_->get() : nullptr; }
   bool is_generalized() const noexcept { return B_.has_value(); }
@@ -66,14 +71,16 @@ public:
   std::optional<double> b_factorization_sec() const noexcept { return b_factorization_sec_; }
 
   // Logging/progress output.
-  void open_log(const fasteig_options& opts, const std::string& solver_name = std::string(), bool append = false);
+  void open_log(const fasteig_options& opts,
+                const std::string& solver_name = std::string(),
+                bool append = false);
   void set_log_path(const std::string& path, bool append = false);
   void set_log_stream(std::ostream* os) noexcept { logger_.attach(os); }
   void close_log() { logger_.close(); }
   fasteig_logger& logger() noexcept { return logger_; }
   const fasteig_logger& logger() const noexcept { return logger_; }
   std::ostream* log_stream() noexcept { return logger_.stream(); }
-  std::ostream* log_stream() const noexcept { return const_cast<fasteig_logger&>(logger_).stream(); }
+  const std::ostream* log_stream() const noexcept { return logger_.stream(); }
 
   // Best-effort iteration count from the most recent solve().
   std::optional<long long> last_iterations() const noexcept { return last_iterations_; }
@@ -94,9 +101,14 @@ private:
                                             const std::vector<FASTEIG_INT>& rowind,
                                             const std::vector<FASTEIG_DOUBLE>& nzvals);
 
+  static CsrMatrixData build_csr_from_sparse_matrix(const SpMat& A,
+                                                    bool expand_symmetric,
+                                                    bool expand_skew);
+
   void build_default_ops_from_H(operations& target_ops);
   void build_default_ops_from_B(operations& target_ops);
   void build_sai_ops_from_H(const fasteig_params& p);
+  void build_csr_from_H();
   static bool is_sai_which(const std::string& which);
   void set_sppc_split(operations& target_ops, FASTEIG_INT ns);
 
@@ -106,6 +118,7 @@ private:
 
   std::optional<std::reference_wrapper<const fasteig_params>> params_;
   std::optional<SpMat> H_;
+  std::optional<CsrMatrixData> csrA_;
   std::optional<SpMat> B_;
   operations opsA_{};
   operations opsB_{};
@@ -135,3 +148,4 @@ private:
   fasteig_logger logger_;
   std::optional<long long> last_iterations_;
 };
+

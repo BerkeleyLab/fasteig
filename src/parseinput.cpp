@@ -1,4 +1,5 @@
-#include "fasteig.hpp"
+#include "parseinput.hpp"
+
 #include "mmio.hpp"  // existing Matrix Market helper in the project
 
 namespace {
@@ -23,6 +24,89 @@ inline bool starts_with_key(std::string_view key, std::string_view token_prefix)
                                                std::tolower(static_cast<unsigned char>(b)); });
 }
 
+bool readRSA(const std::string& filename,
+             FASTEIG_INT& nRows,
+             FASTEIG_INT& nCols,
+             FASTEIG_INT& nNonZeros,
+             std::vector<FASTEIG_INT>& colPtr,
+             std::vector<FASTEIG_INT>& rowInd,
+             std::vector<FASTEIG_DOUBLE>& values) {
+  std::ifstream file(filename);
+  if (!file.is_open()) return false;
+
+  std::string line1, line2, line3, line4, line5;
+  std::getline(file, line1);
+  std::getline(file, line2);
+  std::getline(file, line3);
+  std::getline(file, line4);
+  std::getline(file, line5);
+
+  std::stringstream ss4(line3);
+  std::string type;
+  int dummy = 0;
+  ss4 >> type >> nRows >> nCols >> nNonZeros >> dummy;
+
+  colPtr.resize(static_cast<size_t>(nCols) + 1);
+  for (int i = 0; i <= nCols; ++i) {
+    file >> colPtr[static_cast<size_t>(i)];
+    colPtr[static_cast<size_t>(i)]--;
+  }
+
+  rowInd.resize(static_cast<size_t>(nNonZeros));
+  for (int i = 0; i < nNonZeros; ++i) {
+    file >> rowInd[static_cast<size_t>(i)];
+    rowInd[static_cast<size_t>(i)]--;
+  }
+
+  values.resize(static_cast<size_t>(nNonZeros));
+  for (int i = 0; i < nNonZeros; ++i) {
+    file >> values[static_cast<size_t>(i)];
+  }
+
+  return static_cast<bool>(file);
+}
+
+bool readFEI(const std::string& filename,
+             FASTEIG_INT& nRows,
+             FASTEIG_INT& nCols,
+             FASTEIG_INT& nNonZeros,
+             std::vector<FASTEIG_INT>& colPtr,
+             std::vector<FASTEIG_INT>& rowInd,
+             std::vector<FASTEIG_DOUBLE>& values) {
+  std::ifstream file(filename, std::ios::binary);
+  if (!file.is_open()) return false;
+
+  file.read(reinterpret_cast<char*>(&nRows), sizeof(FASTEIG_INT));
+  file.read(reinterpret_cast<char*>(&nCols), sizeof(FASTEIG_INT));
+  file.read(reinterpret_cast<char*>(&nNonZeros), sizeof(FASTEIG_INT));
+
+  if (!file) {
+    throw std::runtime_error("Failed reading matrix header.");
+  }
+  if (nRows <= 0 || nCols <= 0 || nNonZeros < 0) {
+    throw std::runtime_error("Invalid matrix sizes in binary file.");
+  }
+
+  colPtr.resize(static_cast<size_t>(nCols) + 1);
+  rowInd.resize(static_cast<size_t>(nNonZeros));
+  values.resize(static_cast<size_t>(nNonZeros));
+
+  file.read(reinterpret_cast<char*>(colPtr.data()),
+            sizeof(FASTEIG_INT) * colPtr.size());
+  file.read(reinterpret_cast<char*>(rowInd.data()),
+            sizeof(FASTEIG_INT) * rowInd.size());
+  file.read(reinterpret_cast<char*>(values.data()),
+            sizeof(FASTEIG_DOUBLE) * values.size());
+
+  if (!file) {
+    throw std::runtime_error("Failed reading CSC arrays.");
+  }
+  if (colPtr.front() != 0 || colPtr.back() != nNonZeros) {
+    throw std::runtime_error("Invalid column pointer array.");
+  }
+
+  return true;
+}
 
 } // namespace
 
@@ -282,7 +366,7 @@ FASTEIG_INT InputParser::parse_file(const std::string& filename, fasteig_params&
            break;
            }
         case MatrixFormat::HDF:
-           // 
+           //
            break;
         case MatrixFormat::UNKNOWN:
            //

@@ -1,5 +1,6 @@
 #include "fasteig.hpp"
 #include "fasteig_options.hpp"
+#include "parseinput.hpp"
 #include "fasteig_problem.hpp"
 
 #include <iostream>

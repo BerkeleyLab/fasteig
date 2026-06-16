@@ -50,6 +50,33 @@ class fasteig_problem;
 
 namespace fasteig {
 
+// Utility: sort Ritz value indices for solver selection rules.
+template <typename T>
+std::vector<size_t> sort_indices(const T& v, std::string which) {
+  std::vector<size_t> idx(v.size());
+  std::iota(idx.begin(), idx.end(), 0);
+
+  if (which == "sr") {
+    std::stable_sort(idx.begin(), idx.end(), [&v](size_t i1, size_t i2) {
+      return v(i1) < v(i2);
+    });
+  } else if (which == "lr") {
+    std::stable_sort(idx.begin(), idx.end(), [&v](size_t i1, size_t i2) {
+      return v(i1) > v(i2);
+    });
+  } else if (which == "sm") {
+    std::stable_sort(idx.begin(), idx.end(), [&v](size_t i1, size_t i2) {
+      return std::abs(v(i1)) < std::abs(v(i2));
+    });
+  } else if (which == "lm" || which == "sai") {
+    std::stable_sort(idx.begin(), idx.end(), [&v](size_t i1, size_t i2) {
+      return std::abs(v(i1)) > std::abs(v(i2));
+    });
+  }
+
+  return idx;
+}
+
 class fasteig_solver {
 public:
   virtual ~fasteig_solver() = default;
