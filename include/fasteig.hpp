@@ -174,16 +174,6 @@ public:
   FASTEIG_INT verbosity = -1;    // -1 => unspecified (driver chooses defaults)
   FASTEIG_INT print_every = 0;   // 0 => no per-iteration progress
 
-  // Convenience: raw pointers for legacy code expecting them.
-  // NOTE: pointers are stable as long as the vectors are not reallocated.
-  const FASTEIG_INT* arowind_data() const noexcept { return arowind.empty() ? nullptr : arowind.data(); }
-  const FASTEIG_INT* acolind_data() const noexcept { return acolind.empty() ? nullptr : acolind.data(); }
-  const FASTEIG_DOUBLE* anzvals_data() const noexcept { return anzvals.empty() ? nullptr : anzvals.data(); }
-
-  FASTEIG_INT* arowind_data() noexcept { return arowind.empty() ? nullptr : arowind.data(); }
-  FASTEIG_INT* acolind_data() noexcept { return acolind.empty() ? nullptr : acolind.data(); }
-  FASTEIG_DOUBLE* anzvals_data() noexcept { return anzvals.empty() ? nullptr : anzvals.data(); }
-
   void clear_matrices() {
     n = 0;
     annz = 0;
@@ -244,14 +234,6 @@ private:
 // Small C-compatible wrapper retained for existing callers.
 // NOTE: This is still C++ (it returns/accepts C types), but avoids forcing a rewrite elsewhere.
 extern "C" FASTEIG_INT parseinput(char* fname, fasteig_params* params);
-
-FASTEIG_INT CholeskyQR(MatrixXd &X, MatrixXd &Q, MatrixXd &R);
-
-void Display2Vecs(const Eigen::VectorXd& vec1,
-                  const Eigen::VectorXd& vec2,
-                  const std::string& label1,
-                  const std::string& label2,
-                  int precision);
 
 bool readRSA(const std::string& filename,
              FASTEIG_INT &nRows,

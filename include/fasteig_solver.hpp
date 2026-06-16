@@ -39,27 +39,9 @@ void SPPC_Ind( const MatrixXd &V0,
                int P,
                MatrixXd &X,
                MatrixXd &EIGS,
-               MatrixXd &resnorm,
+               MatrixXd &RESID,
                FASTEIG_DOUBLE tol,
                bool normalize = false );
-
-VectorXd fasteig_compute_residual_norms(const operations& ops,
-                                        const VectorXd& eigvals,
-                                        const MatrixXd& eigvecs);
-
-VectorXd fasteig_compute_residual_norms(const operations& opsA,
-                                        const operations* opsB,
-                                        const VectorXd& eigvals,
-                                        const MatrixXd& eigvecs);
-
-VectorXd fasteig_compute_resnormual_norms(const operations& ops,
-                                          const VectorXd& eigvals,
-                                          const MatrixXd& eigvecs);
-
-VectorXd fasteig_compute_resnormual_norms(const operations& opsA,
-                                          const operations* opsB,
-                                          const VectorXd& eigvals,
-                                          const MatrixXd& eigvecs);
 
 // =============================
 // Solver class hierarchy
@@ -83,7 +65,7 @@ public:
                            VectorXd &Ritzvals,
                            MatrixXd &Ritzvecs,
                            MatrixXd &eigenvectors,
-                           MatrixXd &resnormuals);
+                           MatrixXd &residuals);
 
   static void RayleighRitz(const operations& ops,
                            const Eigen::Ref<const MatrixXd>& V,
@@ -91,15 +73,24 @@ public:
                            std::string which,
                            VectorXd& Ritzvals,
                            MatrixXd& Ritzvecs,
-                           MatrixXd& resnormuals);
+                           MatrixXd& residuals);
+
+  static VectorXd compute_residual_norms(const operations& ops,
+                                         const VectorXd& eigvals,
+                                         const MatrixXd& eigvecs);
+
+  static VectorXd compute_residual_norms(const operations& opsA,
+                                         const operations* opsB,
+                                         const VectorXd& eigvals,
+                                         const MatrixXd& eigvecs);
 
 protected:
   fasteig_solver(::fasteig_problem& problem,
                  const fasteig_options& options);
   const operations& active_ops() const noexcept;
   void compute_final_residual_norms();
-  void compute_final_resnormual_norms();
   void set_iterations(long long it) noexcept { iterations_ = it; }
+  static FASTEIG_INT CholeskyQR(MatrixXd& X, MatrixXd& Q, MatrixXd& R);
 
   ::fasteig_problem& problem_;
   const operations& opsA_;
@@ -128,3 +119,4 @@ std::unique_ptr<fasteig_solver> make_fasteig_solver(const std::string& solver,
                                                     const fasteig_options& options);
 
 }  // namespace fasteig
+

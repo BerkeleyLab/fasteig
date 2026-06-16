@@ -2,7 +2,8 @@
 MKLROOT = /opt/intel/oneapi/mkl/2023.1.0
 MKL = -L${MKLROOT}/lib/intel64 -Wl,-rpath ${MKLROOT}/lib/intel64 -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core -lgomp -lpthread -lm -ldl
 
-HOME = /pscratch/sd/c/cyang/Github/fasteig
+HOME = /global/cfs/cdirs/m1027/Dong/fasteig
+#HOME = /pscratch/sd/c/cyang/Github/fasteig
 #HOME = /pscratch/sd/c/cyang/crd-fasteig
 
 CXX = CC

@@ -45,24 +45,41 @@ MatrixXd apply_block_matvec_fallback(const operations& ops, const Eigen::Ref<con
 
 }  // namespace
 
-}  // namespace fasteig
+fasteig_solver::fasteig_solver(::fasteig_problem& problem,
+                               const fasteig_options& options)
+    : problem_(problem),
+      opsA_(problem.opsA()),
+      opsB_(problem.opsB()),
+      opsSAI_(problem.opsSAI()),
+      eigvals_(problem.eigenvalues()),
+      resnrms_(problem.residual_norms()),
+      eigvecs_(problem.eigenvectors()),
+      options_(options) {}
 
-VectorXd fasteig_compute_residual_norms(const operations& ops,
-                                        const VectorXd& eigvals,
-                                        const MatrixXd& eigvecs) {
-  return fasteig_compute_residual_norms(ops, /*opsB=*/nullptr, eigvals, eigvecs);
+const operations& fasteig_solver::active_ops() const noexcept {
+  return problem_.solver_ops(options_);
 }
 
-VectorXd fasteig_compute_residual_norms(const operations& opsA,
-                                        const operations* opsB,
-                                        const VectorXd& eigvals,
-                                        const MatrixXd& eigvecs) {
+void fasteig_solver::compute_final_residual_norms() {
+  resnrms_ = compute_residual_norms(opsA_, eigvals_, eigvecs_);
+}
+
+VectorXd fasteig_solver::compute_residual_norms(const operations& ops,
+                                                const VectorXd& eigvals,
+                                                const MatrixXd& eigvecs) {
+  return compute_residual_norms(ops, /*opsB=*/nullptr, eigvals, eigvecs);
+}
+
+VectorXd fasteig_solver::compute_residual_norms(const operations& opsA,
+                                                const operations* opsB,
+                                                const VectorXd& eigvals,
+                                                const MatrixXd& eigvecs) {
   const int nev = static_cast<int>(eigvals.size());
   if (eigvecs.cols() < nev) {
-    throw std::invalid_argument("fasteig_compute_residual_norms: eigvecs has fewer columns than eigvals.");
+    throw std::invalid_argument("compute_residual_norms: eigvecs has fewer columns than eigvals.");
   }
   if (!opsA.matvec && !opsA.block_matvec) {
-    throw std::invalid_argument("fasteig_compute_residual_norms: opsA has no matvec or block_matvec.");
+    throw std::invalid_argument("compute_residual_norms: opsA has no matvec or block_matvec.");
   }
 
   VectorXd residuals(nev);
@@ -95,42 +112,20 @@ VectorXd fasteig_compute_residual_norms(const operations& opsA,
   return residuals;
 }
 
-VectorXd fasteig_compute_resnormual_norms(const operations& ops,
-                                          const VectorXd& eigvals,
-                                          const MatrixXd& eigvecs) {
-  return fasteig_compute_residual_norms(ops, eigvals, eigvecs);
-}
+FASTEIG_INT fasteig_solver::CholeskyQR(MatrixXd& X, MatrixXd& Q, MatrixXd& R) {
+  const int ncols = X.cols();
 
-VectorXd fasteig_compute_resnormual_norms(const operations& opsA,
-                                          const operations* opsB,
-                                          const VectorXd& eigvals,
-                                          const MatrixXd& eigvecs) {
-  return fasteig_compute_residual_norms(opsA, opsB, eigvals, eigvecs);
-}
+  Eigen::MatrixXd Gmat = X.transpose() * X;
+  Eigen::LLT<Eigen::MatrixXd> llt(Gmat);
+  if (llt.info() != Eigen::Success) {
+    std::cerr << "CholeskyQR: Gram matrix is not positive definite." << std::endl;
+    return -1;
+  }
 
-namespace fasteig {
-
-fasteig_solver::fasteig_solver(::fasteig_problem& problem,
-                               const fasteig_options& options)
-    : problem_(problem),
-      opsA_(problem.opsA()),
-      opsB_(problem.opsB()),
-      opsSAI_(problem.opsSAI()),
-      eigvals_(problem.eigenvalues()),
-      resnrms_(problem.residual_norms()),
-      eigvecs_(problem.eigenvectors()),
-      options_(options) {}
-
-const operations& fasteig_solver::active_ops() const noexcept {
-  return problem_.solver_ops(options_);
-}
-
-void fasteig_solver::compute_final_residual_norms() {
-  resnrms_ = fasteig_compute_residual_norms(opsA_, eigvals_, eigvecs_);
-}
-
-void fasteig_solver::compute_final_resnormual_norms() {
-  compute_final_residual_norms();
+  const Eigen::MatrixXd L = llt.matrixL();
+  R = L.transpose();
+  Q = X * R.triangularView<Eigen::Upper>().solve(Eigen::MatrixXd::Identity(ncols, ncols));
+  return 0;
 }
 
 std::unique_ptr<fasteig_solver> make_fasteig_solver(const std::string& solver,
@@ -254,3 +249,4 @@ void fasteig_solver::RayleighRitz(const operations& ops,
 }
 
 }  // namespace fasteig
+

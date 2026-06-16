@@ -5,6 +5,7 @@
 #include <chrono>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -19,6 +20,7 @@ fasteig_problem::fasteig_problem(SpMat H, std::string solver)
   if (!H_) throw std::invalid_argument("fasteig_problem: null matrix.");
   if (H_->rows() != H_->cols()) throw std::invalid_argument("fasteig_problem: matrix must be square.");
   n_ = static_cast<FASTEIG_INT>(H_->rows());
+  build_csr_from_H();
   build_default_ops_from_H(opsA_);
 }
 
@@ -45,6 +47,7 @@ fasteig_problem::fasteig_problem(const fasteig_params& p)
   }
 
   if (H_) {
+    build_csr_from_H();
     build_default_ops_from_H(opsA_);
     if (is_sai_which(p.which)) {
       build_sai_ops_from_H(p);
@@ -150,10 +153,10 @@ FASTEIG_INT fasteig_problem::solve() {
 void fasteig_problem::open_log(const fasteig_options& opts,
                                const std::string& solver_name,
                                bool append) {
-  std::string name = solver_name;
-  if (name.empty()) name = opts.solver().empty() ? solver_ : opts.solver();
-  if (name.empty()) name = "Lanczos";
-  set_log_path(opts.output_path(name), append);
+  const std::string name = solver_name.empty() ? opts.solver() : solver_name;
+  const std::string path = opts.output_path(name);
+  if (path.empty()) return;
+  logger_.open(path, append);
 }
 
 void fasteig_problem::set_log_path(const std::string& path, bool append) {
@@ -197,8 +200,7 @@ FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
     open_log(local, solver_name);
   }
 
-  std::ostream* out = log_stream();
-  if (out) {
+  if (logger_.enabled()) {
     logger_.print_matrix_summary(*this);
     logger_.print_run_header(local, solver_name);
   }
@@ -207,16 +209,13 @@ FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
   fasteig_logger stdout_logger;
   if (verbosity >= 1) {
     stdout_logger.attach(&std::cout);
-  }
-  if (verbosity >= 1) {
     stdout_logger.print_matrix_summary(*this);
     stdout_logger.print_run_header(local, solver_name);
   }
 
-  // Generalized setup (e.g., B factorization) should happen once before timing the eigensolver.
   prepare(local);
 
-  if (out) {
+  if (logger_.enabled()) {
     logger_.section("PROGRESS");
   }
   if (verbosity >= 2) {
@@ -233,24 +232,22 @@ FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
     if (!caller_provided_log) close_log();
     return status_;
   }
-
   const auto t0 = std::chrono::steady_clock::now();
   status_ = solver->solve();
   const auto t1 = std::chrono::steady_clock::now();
   const double runtime_sec = std::chrono::duration<double>(t1 - t0).count();
   last_iterations_ = solver->iterations();
 
-  resnrms_ = fasteig_compute_residual_norms(opsA_,
-                                            B_ ? &opsB_ : nullptr,
-                                            eigvals_,
-                                            eigvecs_);
+  resnrms_ = fasteig::fasteig_solver::compute_residual_norms(opsA_,
+                                                             B_ ? &opsB_ : nullptr,
+                                                             eigvals_,
+                                                             eigvecs_);
 
-  if (out) {
+  if (logger_.enabled()) {
     logger_.write_results_text(status_, eigvals_, resnrms_,
                                b_factorization_sec_, runtime_sec, last_iterations_);
     logger_.flush();
   }
-
   if (verbosity >= 1) {
     stdout_logger.print_final_results(status_, eigvals_, resnrms_,
                                       b_factorization_sec_, runtime_sec, last_iterations_);
@@ -373,6 +370,76 @@ SpMat fasteig_problem::build_sparse_matrix_from_RSA(
                     [](FASTEIG_DOUBLE a, FASTEIG_DOUBLE b) { return a + b; });
   A.makeCompressed();
   return A;
+}
+
+fasteig_problem::CsrMatrixData fasteig_problem::build_csr_from_sparse_matrix(
+    const SpMat& A,
+    const bool expand_symmetric,
+    const bool expand_skew) {
+  if (A.rows() != A.cols()) {
+    throw std::runtime_error("CSR conversion requires a square matrix.");
+  }
+  if (A.rows() > std::numeric_limits<int>::max()) {
+    throw std::runtime_error("CSR conversion requires int-sized dimensions.");
+  }
+
+  if (!expand_symmetric && !expand_skew) {
+    Eigen::SparseMatrix<double, Eigen::RowMajor> row_major = A;
+    row_major.makeCompressed();
+
+    CsrMatrixData out;
+    out.rowptr.assign(row_major.outerIndexPtr(),
+                      row_major.outerIndexPtr() + row_major.rows() + 1);
+    out.colind.assign(row_major.innerIndexPtr(),
+                      row_major.innerIndexPtr() + row_major.nonZeros());
+    out.values.assign(row_major.valuePtr(),
+                      row_major.valuePtr() + row_major.nonZeros());
+    return out;
+  }
+
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(A.nonZeros()) * 2);
+  for (int outer = 0; outer < A.outerSize(); ++outer) {
+    for (SpMat::InnerIterator it(A, outer); it; ++it) {
+      const int row = it.row();
+      const int col = it.col();
+      const double value = it.value();
+      triplets.emplace_back(row, col, value);
+      if (row != col) {
+        triplets.emplace_back(col, row, expand_skew ? -value : value);
+      }
+    }
+  }
+
+  Eigen::SparseMatrix<double, Eigen::RowMajor> full(A.rows(), A.cols());
+  full.setFromTriplets(triplets.begin(), triplets.end(),
+                       [](double a, double b) { return a + b; });
+  full.makeCompressed();
+
+  if (full.nonZeros() > std::numeric_limits<int>::max()) {
+    throw std::runtime_error("CSR conversion produced too many nonzeros for int indexing.");
+  }
+
+  CsrMatrixData out;
+  out.rowptr.assign(full.outerIndexPtr(), full.outerIndexPtr() + full.rows() + 1);
+  out.colind.assign(full.innerIndexPtr(), full.innerIndexPtr() + full.nonZeros());
+  out.values.assign(full.valuePtr(), full.valuePtr() + full.nonZeros());
+  return out;
+}
+
+void fasteig_problem::build_csr_from_H() {
+  if (!H_) {
+    csrA_.reset();
+    return;
+  }
+
+  const fasteig_params* p = params_ ? &params_->get() : nullptr;
+  const bool expand_symmetric =
+      p && p->matrixformat == MatrixFormat::MTX && p->mtx_symmetric;
+  const bool expand_skew =
+      p && p->matrixformat == MatrixFormat::MTX && p->mtx_skew_symmetric;
+
+  csrA_ = build_csr_from_sparse_matrix(*H_, expand_symmetric, expand_skew);
 }
 
 bool fasteig_problem::is_sai_which(const std::string& which) {
@@ -514,3 +581,4 @@ void fasteig_problem::build_default_ops_from_B(operations& target_ops) {
     target_ops.block_matvec = [this](const MatrixXd& V, MatrixXd& AV) { AV.noalias() = (*B_) * V; };
   }
 }
+

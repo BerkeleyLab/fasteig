@@ -1,7 +1,11 @@
 #include "DavidsonSolver.hpp"
 
+#include "fasteig_logger.hpp"
+#include "fasteig_problem.hpp"
+
 #include <algorithm>
 #include <cctype>
+#include <iostream>
 
 namespace fasteig {
 
@@ -49,6 +53,10 @@ FASTEIG_INT DavidsonSolver::solve() {
   MatrixXd T(ncols * maxblks, ncols * maxblks), R(ncols, ncols),
       G(ncols, ncols);
   VectorXd Ritzvals(ncols), resnrm(ncols);
+  fasteig_logger stdout_logger;
+  if (options_.verbosity() >= 2) {
+    stdout_logger.attach(&std::cout);
+  }
 
   // Orthonormalize the initial basis vectors before Rayleigh-Ritz.
   RES = eigvecs_;
@@ -78,8 +86,12 @@ FASTEIG_INT DavidsonSolver::solve() {
       row0 = 0;
       col0 = jblk * ncols;
 
-      Display2Vecs(Ritzvals.head(nev), resnrm.head(nev), "Ritz values",
-                   "Residual norms", 6);
+      problem_.logger().print_convergence_data(Ritzvals.head(nev), resnrm.head(nev),
+                                                static_cast<int>(iter + 1));
+      if (options_.verbosity() >= 2) {
+        stdout_logger.print_convergence_data(Ritzvals.head(nev), resnrm.head(nev),
+                                             static_cast<int>(iter + 1));
+      }
 
       // Orthogonalize against previous basis vectors.
       MatrixXd Temp = Q.leftCols(jblk * ncols).transpose() * RES;
@@ -153,3 +165,4 @@ FASTEIG_INT DavidsonSolver::solve() {
 }
 
 }  // namespace fasteig
+

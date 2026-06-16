@@ -28,10 +28,10 @@ FASTEIG_INT ChebyshevSolver::solve(::fasteig_problem& problem,
   ChebyshevSolver solver(problem, local);
   const FASTEIG_INT status = solver.solve();
   problem.residual_norms() =
-      fasteig_compute_residual_norms(problem.opsA(),
-                                     problem.is_generalized() ? &problem.opsB() : nullptr,
-                                     problem.eigenvalues(),
-                                     problem.eigenvectors());
+      fasteig_solver::compute_residual_norms(problem.opsA(),
+                                             problem.is_generalized() ? &problem.opsB() : nullptr,
+                                             problem.eigenvalues(),
+                                             problem.eigenvectors());
   return status;
 }
 
@@ -159,3 +159,4 @@ void ChebyshevSolver::chebyshev_filter(const operations& ops,
 }
 
 }  // namespace fasteig
+
