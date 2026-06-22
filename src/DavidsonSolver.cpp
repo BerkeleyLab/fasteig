@@ -53,17 +53,14 @@ FASTEIG_INT DavidsonSolver::solve() {
   MatrixXd T(ncols * maxblks, ncols * maxblks), R(ncols, ncols),
       G(ncols, ncols);
   VectorXd Ritzvals(ncols), resnrm(ncols);
-  fasteig_logger stdout_logger;
-  if (options_.verbosity() >= 2) {
-    stdout_logger.attach(&std::cout);
-  }
+  fasteig_logger stdout_logger(&std::cout);
 
   // Orthonormalize the initial basis vectors before Rayleigh-Ritz.
   RES = eigvecs_;
   info = CholeskyQR(RES, eigvecs_, R);
   if (info != 0) {
-    std::cout << "Cholesky factorization failed, info = " << info
-              << std::endl;
+    stdout_logger.print_progress_note(
+        "Cholesky factorization failed, info = " + std::to_string(info));
     std::exit(1);
   }
 
@@ -102,8 +99,8 @@ FASTEIG_INT DavidsonSolver::solve() {
       // Orthonormalize within the block.
       info = CholeskyQR(RES, eigvecs_, R);
       if (info != 0) {
-        std::cout << "Cholesky factorization failed, info = " << info
-                  << std::endl;
+        stdout_logger.print_progress_note(
+            "Cholesky factorization failed, info = " + std::to_string(info));
         std::exit(1);
       }
 
@@ -165,4 +162,3 @@ FASTEIG_INT DavidsonSolver::solve() {
 }
 
 }  // namespace fasteig
-

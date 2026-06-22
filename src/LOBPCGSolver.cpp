@@ -125,7 +125,7 @@ FASTEIG_INT LOBPCGSolver::solve() {
   //    }
 
       // Orthogonalize W against [X P]
-      if (use_orth)       ortho(W, XP, orth_tol, eigsolver);
+      if (use_orth)       ortho(W, XP, orth_tol);
 
       // Update matrix-vector product A*W
       ops_.block_matvec(W, AW);
@@ -146,7 +146,7 @@ FASTEIG_INT LOBPCGSolver::solve() {
           string orth_message = "Orthogonalizing W";
           if (log) problem_.logger().print_progress_note(orth_message, k+1);
           if (verbose >= 2) stdout_logger.print_progress_note(orth_message, k+1);
-          ortho(W, XP, orth_tol, eigsolver);
+          ortho(W, XP, orth_tol);
           // Recompute AW
           ops_.block_matvec(W, AW);
           // Re-run RR step
@@ -338,6 +338,55 @@ void LOBPCGSolver::lock_eigenvectors() {
 
         // Officially update b_conv
         b_conv += lock;
+    }
+}
+
+void LOBPCGSolver::svqb(MatrixXd& U, double tau, char method) {
+    MatrixXd overlap = U.transpose() * U;
+
+    VectorXd d = overlap.diagonal();
+    d = d.array().sqrt().inverse();
+    const auto D = d.asDiagonal();
+    overlap.applyOnTheLeft(D);
+    overlap.applyOnTheRight(D);
+
+    eigsolver.compute(overlap);
+    VectorXd theta = eigsolver.eigenvalues();
+    const MatrixXd Z = eigsolver.eigenvectors();
+
+    const double threshold = tau * theta.lpNorm<Infinity>();
+    const double newval = (method == 'R') ? threshold : 0.0;
+    theta = (theta.array() < threshold).select(newval, theta);
+    theta = theta.array().sqrt().inverse();
+    theta = theta.array().isInf().select(0, theta);
+
+    U.applyOnTheRight(D);
+    U.applyOnTheRight(Z);
+    U.applyOnTheRight(theta.asDiagonal());
+}
+
+void LOBPCGSolver::ortho(MatrixXd& U,
+                         const MatrixXd& V,
+                         double tol,
+                         int maxiter1,
+                         int maxiter2,
+                         double tau) {
+    const int block_size = U.cols();
+    const MatrixXd identity = MatrixXd::Identity(block_size, block_size);
+
+    double normU = U.norm();
+    for (int i = 0; i < maxiter1; ++i) {
+        U = U - V * (V.transpose() * U);
+
+        for (int j = 0; j < maxiter2; ++j) {
+            svqb(U, tau, (j == 0) ? 'R' : 'D');
+            normU = U.norm();
+            const double orth_err = (U.transpose() * U - identity).norm();
+            if (orth_err < tol * normU) break;
+        }
+
+        const double orth_err = (V.transpose() * U).norm();
+        if (orth_err < tol * normU) break;
     }
 }
 

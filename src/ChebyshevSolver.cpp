@@ -1,12 +1,15 @@
 #include "ChebyshevSolver.hpp"
 
 #include "KrylovSubspace.hpp"
+#include "fasteig_logger.hpp"
 #include "fasteig_problem.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 
 namespace fasteig {
 
@@ -82,21 +85,49 @@ FASTEIG_INT ChebyshevSolver::solve() {
   MatrixXd residuals(n, nev);
   FASTEIG_INT info = 0;
   FASTEIG_INT it_done = 0;
+  const bool verbose = options_.verbosity() != 0;
+  fasteig_logger stdout_logger;
+  if (verbose) {
+    stdout_logger.attach(&std::cout);
+  }
+  fasteig_logger stderr_logger(&std::cerr);
 
-  std::cout << "Chebyshev filtering for low the of the spectrum... \n" << std::endl;
+  const std::string filtering_message =
+      "Chebyshev filtering for the low end of the spectrum...";
+  problem_.logger().print_progress_note(filtering_message);
+  if (verbose) {
+    stdout_logger.print_progress_note(filtering_message);
+  }
   KrylovSubspace::getevbounds(n, ops_eff, lambda_min, lambda_max);
-  std::cout << "Spectral bounds from Lanczos: " << std::endl;
-  std::cout << "lb = " << lambda_min << " ub = " << lambda_max << std::endl;
+  problem_.logger().print_progress_note("Spectral bounds from Lanczos:");
+  if (verbose) {
+    stdout_logger.print_progress_note("Spectral bounds from Lanczos:");
+  }
+  std::ostringstream bounds_message;
+  bounds_message << std::scientific << std::setprecision(6)
+                 << "lb = " << lambda_min << " ub = " << lambda_max;
+  problem_.logger().print_progress_note(bounds_message.str());
+  if (verbose) {
+    stdout_logger.print_progress_note(bounds_message.str());
+  }
 
   for (FASTEIG_INT iter = 0; iter < maxiter; ++iter) {
-    std::cout << "Cheby filter iter = " << iter << std::endl;
+    const std::string iteration_message =
+        "Cheby filter iter = " + std::to_string(iter);
+    problem_.logger().print_progress_note(iteration_message);
+    if (verbose) {
+      stdout_logger.print_progress_note(iteration_message);
+    }
 
     chebyshev_filter(ops_eff, X, degree, lambda_min, lambda_max);
 
     const MatrixXd Gmat = X.transpose() * X;
     Eigen::LLT<MatrixXd> llt(Gmat);
     if (llt.info() != Eigen::Success) {
-      std::cerr << "Decomposition failed. Matrix may not be positive definite." << std::endl;
+      const std::string failure_message =
+          "Decomposition failed. Matrix may not be positive definite.";
+      problem_.logger().print_progress_note(failure_message);
+      stderr_logger.print_progress_note(failure_message);
       info = -1;
       break;
     }
@@ -109,7 +140,13 @@ FASTEIG_INT ChebyshevSolver::solve() {
     basis_vecs = X.transpose() * eigvecs_;
     eigvecs_ = eigvecs_ - X * basis_vecs;
     subspace_resnrm = eigvecs_.norm();
-    std::cout << "subspace residual norm = " << subspace_resnrm << std::endl;
+    std::ostringstream residual_message;
+    residual_message << std::scientific << std::setprecision(2)
+                     << "subspace residual norm = " << subspace_resnrm;
+    problem_.logger().print_progress_note(residual_message.str());
+    if (verbose) {
+      stdout_logger.print_progress_note(residual_message.str());
+    }
     it_done = iter + 1;
   }
 
@@ -159,4 +196,3 @@ void ChebyshevSolver::chebyshev_filter(const operations& ops,
 }
 
 }  // namespace fasteig
-

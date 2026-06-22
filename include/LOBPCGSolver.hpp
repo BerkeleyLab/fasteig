@@ -21,6 +21,13 @@ private:
   void initialize_XP_subspaces();
   void lock_eigenvectors();
   bool modified_rayleigh_ritz();
+  void ortho(MatrixXd& U,
+             const MatrixXd& V,
+             double tol,
+             int maxiter1 = 3,
+             int maxiter2 = 3,
+             double tau = 1e-10);
+  void svqb(MatrixXd& U, double tau, char method);
 
   int iter = -1;                 // Iteration counter
   operations ops_;               // Active operator (may be transformed for which=LR/LM)
@@ -64,17 +71,3 @@ private:
 };
 
 }  // namespace fasteig
-
-void ortho(MatrixXd& U,
-           const MatrixXd& V,
-           double tol,
-           Eigen::SelfAdjointEigenSolver<MatrixXd>& solver,
-           int maxiter1 = 3,
-           int maxiter2 = 3,
-           double tau = 1e-10);
-
-void svqb(MatrixXd& U,
-          double tau,
-          char method,
-          Eigen::SelfAdjointEigenSolver<MatrixXd>& solver);
-
