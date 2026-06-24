@@ -6,6 +6,9 @@ all: lib
 
 lib: libfasteig
 
+examples: libfasteig
+	$(MAKE) -C $(HOME)/examples MAKEINC=$(MAKEINC_ABS)
+
 libfasteig:
 	cd $(HOME)/src; \
         $(ECHO) Making lib in src; \
@@ -18,6 +21,7 @@ clean:
 	$(MAKE) MAKEINC=$(MAKEINC_ABS) clean; \
 	cd ..; 
 	rm -f libfasteig_$(PLAT).a
+	$(MAKE) -C $(HOME)/examples MAKEINC=$(MAKEINC_ABS) clean
 
 help:
     @$(ECHO) "usage: make ?"

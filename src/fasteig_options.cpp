@@ -98,6 +98,8 @@ bool fasteig_options::set(std::string_view key, std::string_view value) {
     logprefix_ = std::string(value);
   } else if (k == "output_format") {
     output_format_ = std::string(value);
+  } else if (k == "gpu_backend") {
+    gpu_backend_ = parse_bool(key, value);
   //} else if (k == "verbose") {
   //  verbose_ = parse_bool(key, value);
   } else if (k == "logprefix" || k == "logfile") {
@@ -133,6 +135,7 @@ std::string fasteig_options::get(std::string_view key) const {
   //DMR
   if (k == "output_prefix") return logprefix_;
   if (k == "output_format") return output_format_;
+  if (k == "gpu_backend") return gpu_backend_ ? "true" : "false";
 
   throw std::out_of_range("Unknown option key: " + std::string(key));
 }

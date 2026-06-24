@@ -56,6 +56,8 @@ public:
   std::string logfile() const noexcept {return logprefix_;}
   std::string output_prefix() const noexcept { return logprefix_; }
   std::string output_format() const noexcept { return output_format_; }
+  bool gpu_backend() const noexcept { return gpu_backend_; }
+  void set_gpu_backend(bool enabled) noexcept { gpu_backend_ = enabled; }
 
   std::string output_path(std::string_view solver_name) const {
     if (logprefix_.empty()) return {};
@@ -113,6 +115,7 @@ private:
 
   int verbosity_ = 1;
   FASTEIG_INT print_every_ = 0;
+  bool gpu_backend_ = false;
 
   MatrixXd v0_; // optional initial block vectors (typically n x blocksize)
 
