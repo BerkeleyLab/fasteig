@@ -1,12 +1,16 @@
 #include "BlockLanczosSolver.hpp"
 
-#include "KrylovSubspace.hpp"
+#include "core/Executor.hpp"
+#include "core/KrylovSubspace.hpp"
+#include "core/LinearOperator.hpp"
+#include "core/MultiVector.hpp"
 #include "fasteig_problem.hpp"
 #include "fasteig_logger.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -27,7 +31,6 @@ BlockLanczosSolver::BlockLanczosSolver(::fasteig_problem& problem,
     : fasteig_solver(problem, options) {}
 
 FASTEIG_INT BlockLanczosSolver::solve() {
-  const operations& ops = active_ops();
   const FASTEIG_INT n = eigvecs_.rows();
   const FASTEIG_INT nev = options_.nev();
   const FASTEIG_INT maxiter = options_.maxiter();     // number of block iterations
@@ -40,7 +43,6 @@ FASTEIG_INT BlockLanczosSolver::solve() {
   if (nev <= 0) throw std::invalid_argument("BlockLanczosSolver: nev must be > 0.");
   if (maxiter <= 0) throw std::invalid_argument("BlockLanczosSolver: maxiter must be > 0.");
   if (blksize <= 0) throw std::invalid_argument("BlockLanczosSolver: blksize must be > 0.");
-  if (!ops.block_matvec) throw std::invalid_argument("BlockLanczosSolver: ops.block_matvec is not set.");
 
   const int b = static_cast<int>(blksize);
   const int max_blocks = static_cast<int>(maxiter);
@@ -75,12 +77,13 @@ FASTEIG_INT BlockLanczosSolver::solve() {
   } else {
     V0 = MatrixXd::Random(n, b);
   }
-  MatrixXd Q(n, (max_blocks + 1) * b);
   MatrixXd T((max_blocks + 1) * b, (max_blocks + 1) * b);
-  Q.setZero();
   T.setZero();
 
   MatrixXd beta(b, b);
+  std::shared_ptr<core::Executor> exec = problem_.executor(options_);
+  std::unique_ptr<core::LinearOperator> op = problem_.make_linear_operator(options_, *exec);
+  auto basis = exec->create_multivector(n, static_cast<FASTEIG_INT>((max_blocks + 1) * b));
 
   struct Snapshot {
     VectorXd lam;      // Ritz values (nev_i)
@@ -152,16 +155,9 @@ FASTEIG_INT BlockLanczosSolver::solve() {
   int it_stop = max_blocks;
   int last_emitted_iter = 0;
   Snapshot final;
-  KrylovSubspace krylov(V0, Q, T, beta);
+  core::BlockKrylovSubspace krylov(*op, V0, *basis, T, beta);
   for (int iter = 1; iter <= max_blocks; ++iter) {
-    if (iter == 1) {
-      krylov.build_block(ops, /*begin=*/0, /*end=*/1);
-    } else {
-      krylov.build_block(ops, static_cast<size_t>(iter - 1), static_cast<size_t>(iter));
-    }
-    Q = krylov.OrthoBasis();
-    T = krylov.ProjectedMatrix();
-    beta = krylov.beta();
+    krylov.build(static_cast<FASTEIG_INT>(iter - 1), static_cast<FASTEIG_INT>(iter));
 
     // Always compute/check convergence once the subspace is large enough to represent nev.
     const bool do_check = (iter * b >= static_cast<int>(nev));
@@ -192,10 +188,11 @@ FASTEIG_INT BlockLanczosSolver::solve() {
 
   const int m_dim = it_stop * b;
   eigvals_ = final.lam;
-  eigvecs_.noalias() = Q.leftCols(m_dim) * final.Csel;
+  eigvecs_.noalias() = krylov.host_basis().leftCols(m_dim) * final.Csel;
   compute_final_residual_norms();
   set_iterations(static_cast<long long>(it_stop));
   return status_;
 }
 
 }  // namespace fasteig
+

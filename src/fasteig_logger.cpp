@@ -253,6 +253,7 @@ void fasteig_logger::print_run_header(const fasteig_options& opts,
   if (opts.maxiter() > 0) print_kv("Max Iterations", std::to_string(opts.maxiter()));
   if (opts.print_every() > 0) print_kv("Print Every", std::to_string(opts.print_every()));
   print_kv("Verbosity", std::to_string(opts.verbosity()));
+  if (opts.gpu_backend()) print_kv("GPU Backend", "CUDA Executor");
 
   if (opts.blksize() > 1) print_kv("Block Size", std::to_string(opts.blksize()));
   if (opts.maxdim() > 0) print_kv("Max Subspace Dim", std::to_string(opts.maxdim()));
@@ -306,83 +307,6 @@ void fasteig_logger::print_convergence_data(const Eigen::Ref<const VectorXd> rit
        << std::setw(10) << std::setprecision(3) << residuals(i);
     print_progress_note(ss.str(), -1);
   }
-}
-
-void fasteig_logger::print_gpu_lanczos_timings(const fasteig_gpu_lanczos_timings& timings) {
-  auto* os = stream();
-  if (!os) return;
-  const auto& t = timings;
-
-  *os << "\n";
-  *os << "GPU LANCZOS TIMINGS\n";
-  *os << "===================\n\n";
-
-  *os << "  Setup\n";
-  *os << "  -----\n";
-  *os << "  GPU Setup (sec)          : " << std::fixed << std::setprecision(6) << t.setup_sec << "\n";
-  *os << "  Context Setup (sec)      : " << std::fixed << std::setprecision(6) << t.context_sec << "\n";
-  *os << "  Matrix Setup (sec)       : " << std::fixed << std::setprecision(6) << t.matrix_setup_sec << "\n";
-  *os << "  Device Alloc (sec)       : " << std::fixed << std::setprecision(6) << t.device_alloc_sec << "\n";
-  if (t.use_gpu_snapshot) {
-    *os << "  Snapshot Setup (sec)     : " << std::fixed << std::setprecision(6) << t.snapshot_setup_sec << "\n";
-  }
-
-  *os << "\n";
-  *os << "  Krylov Loop\n";
-  *os << "  -----------\n";
-  *os << "  GPU Matvec Calls         : " << t.matvec_calls << "\n";
-  *os << "  Orthog Backend           : " << (t.use_cpu_orthog ? "CPU" : "GPU") << "\n";
-  *os << "  T Backend                : " << (t.use_cpu_orthog ? "CPU" : "GPU") << "\n";
-  *os << "  Initial H2D (sec)        : " << std::fixed << std::setprecision(6) << t.initial_h2d_sec << "\n";
-  *os << "  SpMV Total (sec)         : " << std::fixed << std::setprecision(6) << t.spmv_sec << "\n";
-  *os << "  Orthog Total (sec)       : " << std::fixed << std::setprecision(6) << t.orthog_sec << "\n";
-  if (!t.use_cpu_orthog) {
-    *os << "  T Update Total (sec)     : " << std::fixed << std::setprecision(6) << t.t_update_sec << "\n";
-  }
-  if (t.use_cpu_orthog) {
-    *os << "  CPU Orthog Transfers     : " << std::fixed << std::setprecision(6) << t.cpu_orthog_transfer_sec << "\n";
-  }
-  if (t.matvec_calls > 0) {
-    *os << "  SpMV Avg (sec)           : " << std::scientific << std::setprecision(6)
-        << (t.spmv_sec / static_cast<double>(t.matvec_calls)) << "\n";
-    *os << "  Orthog Avg (sec)         : " << std::scientific << std::setprecision(6)
-        << (t.orthog_sec / static_cast<double>(t.matvec_calls)) << "\n";
-  }
-  *os << "  Krylov Enqueue Wall      : " << std::fixed << std::setprecision(6) << t.krylov_total_sec << "\n";
-  if (!t.use_cpu_orthog) {
-    *os << "  GPU Loop Events (sec)    : " << std::fixed << std::setprecision(6) << t.gpu_loop_event_sec << "\n";
-  }
-
-  *os << "\n";
-  *os << "  Snapshot Eigensolve\n";
-  *os << "  -------------------\n";
-  *os << "  Snapshot Backend         : " << (t.use_gpu_snapshot ? "cuSOLVER" : "Eigen CPU") << "\n";
-  *os << "  Snapshot Eig (sec)       : " << std::fixed << std::setprecision(6) << t.snapshot_sec << "\n";
-  if (t.use_gpu_snapshot) {
-    if (t.use_cpu_orthog) {
-      *os << "  Snapshot T H2D (sec)     : " << std::fixed << std::setprecision(6) << t.snapshot_h2d_sec << "\n";
-    } else {
-      *os << "  Snapshot T D2D (sec)     : " << std::fixed << std::setprecision(6) << t.snapshot_t_d2d_sec << "\n";
-    }
-    *os << "  Snapshot Kernel (sec)    : " << std::fixed << std::setprecision(6) << t.snapshot_kernel_sec << "\n";
-    *os << "  Snapshot D2H (sec)       : " << std::fixed << std::setprecision(6) << t.snapshot_d2h_sec << "\n";
-  } else if (!t.use_cpu_orthog) {
-    *os << "  Snapshot T D2H (sec)     : " << std::fixed << std::setprecision(6) << t.snapshot_t_d2h_sec << "\n";
-  }
-
-  *os << "\n";
-  *os << "  Final Ritz Vectors\n";
-  *os << "  ------------------\n";
-  *os << "  Ritz Csel H2D (sec)      : " << std::fixed << std::setprecision(6) << t.ritz_h2d_sec << "\n";
-  *os << "  Ritz GEMM (sec)          : " << std::fixed << std::setprecision(6) << t.ritz_gemm_sec << "\n";
-  *os << "  Ritz Vector D2H (sec)    : " << std::fixed << std::setprecision(6) << t.ritz_d2h_sec << "\n";
-  *os << "  Ritz Vector Build (sec)  : " << std::fixed << std::setprecision(6) << t.eigvec_sec << "\n";
-
-  *os << "\n";
-  *os << "  Final Check\n";
-  *os << "  -----------\n";
-  *os << "  Transfer Total (sec)     : " << std::fixed << std::setprecision(6) << t.transfer_sec << "\n";
-  *os << "  Final Residuals (sec)    : " << std::fixed << std::setprecision(6) << t.residual_sec << "\n";
 }
 
 void fasteig_logger::print_eigenpairs_table(const VectorXd& eigvals,

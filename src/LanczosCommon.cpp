@@ -1,5 +1,6 @@
 #include "LanczosCommon.hpp"
 
+#include "fasteig_logger.hpp"
 #include "fasteig_solver.hpp"
 
 #include <algorithm>
@@ -85,6 +86,39 @@ LanczosSnapshot lanczos_make_snapshot_from_eigendecomp(const VectorXd& eigenvalu
   return out;
 }
 
+LanczosSnapshot lanczos_make_snapshot_from_eigenvalues_last_row(const VectorXd& eigenvalues,
+                                                               const VectorXd& eigenvector_last_row,
+                                                               FASTEIG_INT nev,
+                                                               FASTEIG_DOUBLE beta_next,
+                                                               const std::string& which) {
+  const int m = static_cast<int>(eigenvalues.size());
+  if (m <= 0) {
+    throw std::invalid_argument("lanczos_make_snapshot_from_eigenvalues_last_row: no eigenvalues.");
+  }
+  if (eigenvector_last_row.size() != m) {
+    throw std::invalid_argument(
+        "lanczos_make_snapshot_from_eigenvalues_last_row: last-row dimension mismatch.");
+  }
+
+  const int nev_i = static_cast<int>(std::min<FASTEIG_INT>(nev, static_cast<FASTEIG_INT>(m)));
+  const std::vector<size_t> indices = lanczos_select_ritz_indices(eigenvalues, which);
+
+  VectorXd lam(nev_i);
+  VectorXd rel(nev_i);
+  for (int j = 0; j < nev_i; ++j) {
+    const int idx = static_cast<int>(indices[static_cast<std::size_t>(j)]);
+    const double lambda = eigenvalues(idx);
+    lam(j) = lambda;
+    const double abs_res = std::abs(beta_next * eigenvector_last_row(idx));
+    rel(j) = abs_res / (1.0 + std::abs(lambda));
+  }
+
+  LanczosSnapshot out;
+  out.lam = std::move(lam);
+  out.rel_res = std::move(rel);
+  return out;
+}
+
 LanczosSnapshot lanczos_compute_cpu_snapshot(const MatrixXd& T,
                                              FASTEIG_INT m,
                                              FASTEIG_INT nev,
@@ -105,62 +139,18 @@ LanczosSnapshot lanczos_compute_cpu_snapshot(const MatrixXd& T,
                                                nev, beta_next, which, need_vectors);
 }
 
-LanczosConvergenceResult run_lanczos_convergence_loop(const LanczosConvergenceConfig& config,
-                                                      const LanczosAdvanceFn& advance,
-                                                      const LanczosSnapshotFn& snapshot,
-                                                      const LanczosEmitFn& emit) {
-  if (config.nev <= 0) {
-    throw std::invalid_argument("run_lanczos_convergence_loop: nev must be > 0.");
+void lanczos_emit_snapshot(const LanczosSnapshot& snapshot,
+                           FASTEIG_INT iter_label,
+                           fasteig_logger* log_logger,
+                           fasteig_logger* stdout_logger) {
+  if (log_logger) {
+    log_logger->print_convergence_data(snapshot.lam, snapshot.rel_res,
+                                       static_cast<int>(iter_label));
   }
-  if (config.maxiter <= 0) {
-    throw std::invalid_argument("run_lanczos_convergence_loop: maxiter must be > 0.");
+  if (stdout_logger) {
+    stdout_logger->print_convergence_data(snapshot.lam, snapshot.rel_res,
+                                          static_cast<int>(iter_label));
   }
-  if (!advance) {
-    throw std::invalid_argument("run_lanczos_convergence_loop: advance callback is empty.");
-  }
-  if (!snapshot) {
-    throw std::invalid_argument("run_lanczos_convergence_loop: snapshot callback is empty.");
-  }
-
-  LanczosConvergenceResult result;
-  result.it_stop = config.maxiter;
-  FASTEIG_DOUBLE last_beta_next = 0.0;
-
-  for (FASTEIG_INT it = 0; it < config.maxiter; ++it) {
-    last_beta_next = advance(it);
-
-    const FASTEIG_INT m = it + 1;
-    const bool do_progress = (config.print_every > 0) && ((m % config.print_every) == 0);
-    const bool do_silent_check =
-        (config.print_every <= 0) &&
-        (config.silent_check_interval > 0) &&
-        ((m % config.silent_check_interval) == 0);
-    const bool do_check = (m >= config.nev) && (do_progress || do_silent_check || m == config.maxiter);
-
-    if (!do_progress && !do_check) continue;
-
-    LanczosSnapshot snap = snapshot(m, last_beta_next, /*need_vectors=*/false);
-    if (do_progress) {
-      if (emit) emit(snap, m);
-      result.last_emitted_iter = m;
-    }
-
-    if (do_check && snap.rel_res.size() > 0 && snap.rel_res.maxCoeff() < config.tol) {
-      result.converged = true;
-      result.it_stop = m;
-      result.final = snapshot(m, last_beta_next, /*need_vectors=*/true);
-      if (!do_progress && config.print_every > 0) {
-        if (emit) emit(result.final, m);
-      }
-      return result;
-    }
-  }
-
-  result.final = snapshot(config.maxiter, last_beta_next, /*need_vectors=*/true);
-  if (config.print_every > 0 && result.last_emitted_iter != config.maxiter) {
-    if (emit) emit(result.final, config.maxiter);
-  }
-  return result;
 }
 
 }  // namespace fasteig

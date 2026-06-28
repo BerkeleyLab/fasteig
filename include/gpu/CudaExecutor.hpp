@@ -13,6 +13,8 @@ namespace core {
 
 class CudaExecutor final : public Executor {
 public:
+  using Executor::create_vector;
+
   explicit CudaExecutor(int device_id = 0);
 
   ExecutorKind kind() const noexcept override { return ExecutorKind::Cuda; }
@@ -24,6 +26,7 @@ public:
   std::unique_ptr<MultiVector> create_multivector(FASTEIG_INT rows,
                                                   FASTEIG_INT cols) const override;
   std::unique_ptr<CsrMatrix> create_csr_matrix(const CsrMatrixData& data) const override;
+  void synchronize() const override;
 
 private:
   int device_id_ = 0;

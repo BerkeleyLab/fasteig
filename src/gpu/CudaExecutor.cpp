@@ -36,6 +36,10 @@ std::unique_ptr<CsrMatrix> CudaExecutor::create_csr_matrix(const CsrMatrixData& 
   return std::make_unique<CudaCsrMatrix>(*this, data);
 }
 
+void CudaExecutor::synchronize() const {
+  FASTEIG_CUDA_CHECK(cudaStreamSynchronize(context().stream()));
+}
+
 std::shared_ptr<Executor> make_cuda_executor(int device_id) {
   return std::make_shared<CudaExecutor>(device_id);
 }

@@ -5,25 +5,14 @@
 #include "gpu/CudaExecutor.hpp"
 #include "gpu/CudaContext.hpp"
 #include "gpu/CudaCheck.hpp"
+#include "gpu/CudaUtils.hpp"
 
 #include <cuda_runtime.h>
 
 #include <stdexcept>
-#include <string>
 
 namespace fasteig {
 namespace core {
-namespace {
-
-const CudaExecutor& cuda_executor_from(const Executor& exec, const char* where) {
-  const auto* cuda_exec = dynamic_cast<const CudaExecutor*>(&exec);
-  if (!cuda_exec) {
-    throw std::invalid_argument(std::string(where) + ": executor is not a CudaExecutor.");
-  }
-  return *cuda_exec;
-}
-
-}  // namespace
 
 CudaVector::CudaVector(const Executor& exec, FASTEIG_INT size)
     : exec_(exec), size_(size) {
@@ -80,7 +69,6 @@ void CudaVector::copy_from(const Vector& src) {
   if (size_ > 0) {
     FASTEIG_CUBLAS_CHECK(cublasDcopy(context.cublas_handle(), static_cast<int>(size_),
                                      cuda_src->d_values_, 1, d_values_, 1));
-    FASTEIG_CUDA_CHECK(cudaStreamSynchronize(context.stream()));
   }
 }
 
@@ -89,7 +77,6 @@ void CudaVector::set_zero() {
   if (size_ > 0) {
     FASTEIG_CUDA_CHECK(cudaMemsetAsync(d_values_, 0, static_cast<size_t>(size_) * sizeof(double),
                                        context.stream()));
-    FASTEIG_CUDA_CHECK(cudaStreamSynchronize(context.stream()));
   }
 }
 
@@ -98,7 +85,6 @@ void CudaVector::scale(double alpha) {
   if (size_ > 0) {
     FASTEIG_CUBLAS_CHECK(cublasDscal(context.cublas_handle(), static_cast<int>(size_),
                                      &alpha, d_values_, 1));
-    FASTEIG_CUDA_CHECK(cudaStreamSynchronize(context.stream()));
   }
 }
 
@@ -114,7 +100,6 @@ void CudaVector::axpy(double alpha, const Vector& x) {
   if (size_ > 0) {
     FASTEIG_CUBLAS_CHECK(cublasDaxpy(context.cublas_handle(), static_cast<int>(size_),
                                      &alpha, cuda_x->d_values_, 1, d_values_, 1));
-    FASTEIG_CUDA_CHECK(cudaStreamSynchronize(context.stream()));
   }
 }
 

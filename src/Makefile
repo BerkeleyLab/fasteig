@@ -14,11 +14,11 @@ $(BUILD_TAG_FILE):
 	@{ echo "PLAT=$(PLAT)"; echo "CXX=$(CXX)"; echo "CXXFLAGS=$(CXXFLAGS)"; } > $@.tmp
 	@cmp -s $@ $@.tmp 2>/dev/null && rm -f $@.tmp || mv $@.tmp $@
 
-COMMON_OBJS = core/Executor.o core/Vector.o core/MultiVector.o core/CsrMatrix.o core/Operations.o KrylovSubspace.o mmio.o rmmdiis.o SPPC_Ind.o parseinput.o fasteig_solver.o LanczosCommon.o LanczosSolver.o BlockLanczosSolver.o KrylovSchurSolver.o DavidsonSolver.o LOBPCGSolver.o ChebyshevSolver.o SPPCSolver.o RMMDIISSolver.o fasteig_options.o fasteig_problem.o fasteig_logger.o
+COMMON_OBJS = core/Executor.o core/Vector.o core/MultiVector.o core/CsrMatrix.o core/Operations.o core/OperationsOperator.o core/LanczosWorkspace.o core/KrylovSubspace.o KrylovSubspace.o mmio.o rmmdiis.o SPPC_Ind.o parseinput.o fasteig_solver.o LanczosCommon.o LanczosSolver.o BlockLanczosSolver.o KrylovSchurSolver.o DavidsonSolver.o LOBPCGSolver.o ChebyshevSolver.o SPPCSolver.o RMMDIISSolver.o fasteig_options.o fasteig_problem.o fasteig_logger.o
 
 CUDA_OBJS =
 ifeq ($(USE_CUDA),1)
-CUDA_OBJS += gpu/CudaExecutor.o gpu/CudaVector.o gpu/CudaMultiVector.o gpu/CudaCsrMatrix.o gpu/CudaContext.o
+CUDA_OBJS += gpu/CudaExecutor.o gpu/CudaVector.o gpu/CudaMultiVector.o gpu/CudaCsrMatrix.o gpu/CudaContext.o gpu/CudaLanczosWorkspace.o gpu/CudaLanczosKernels.o
 endif
 
 OBJS = $(COMMON_OBJS) $(CUDA_OBJS)

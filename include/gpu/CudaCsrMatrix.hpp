@@ -23,7 +23,11 @@ public:
   FASTEIG_INT nonzeros() const noexcept override { return nnz_; }
 
   CsrMatrixData copy_to_host() const override;
-  void spmv(const Vector& x, Vector& y, double alpha = 1.0, double beta = 0.0) const override;
+  void apply(const Vector& x, Vector& y, double alpha = 1.0, double beta = 0.0) const override;
+  void apply_column(const MultiVector& X, FASTEIG_INT col, Vector& y,
+                    double alpha = 1.0, double beta = 0.0) const override;
+  void apply_block(const MultiVector& X, FASTEIG_INT first_col, FASTEIG_INT block_size,
+                   MultiVector& Y, double alpha = 1.0, double beta = 0.0) const override;
 
 private:
   const Executor& exec_;

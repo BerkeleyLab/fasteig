@@ -6,12 +6,20 @@
 #include "fasteig_solver.hpp"
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+namespace fasteig {
+namespace core {
+class Executor;
+class LinearOperator;
+}  // namespace core
+}  // namespace fasteig
 
 class fasteig_problem {
 public:
@@ -65,6 +73,12 @@ public:
   const SpMat* bmatrix() const noexcept { return B_.has_value() ? &(*B_) : nullptr; }
   const fasteig_params* params() const noexcept { return params_.has_value() ? &params_->get() : nullptr; }
   bool is_generalized() const noexcept { return B_.has_value(); }
+
+  std::shared_ptr<fasteig::core::Executor> executor(const fasteig_options& opts);
+  void set_executor(std::shared_ptr<fasteig::core::Executor> exec);
+  std::unique_ptr<fasteig::core::LinearOperator> make_linear_operator(
+      const fasteig_options& opts,
+      const fasteig::core::Executor& exec) const;
 
   // Generalized eigenproblem setup (currently: factorize B once for KrylovSchur).
   void prepare(const fasteig_options& opts);
@@ -123,6 +137,7 @@ private:
   operations opsA_{};
   operations opsB_{};
   operations opsSAI_{};
+  std::shared_ptr<fasteig::core::Executor> executor_;
   FASTEIG_INT n_ = 0;
 
   FASTEIG_INT ns_ = 0;

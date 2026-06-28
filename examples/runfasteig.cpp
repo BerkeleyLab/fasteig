@@ -1,11 +1,25 @@
 #include "fasteig.hpp"
+#include "core/Executor.hpp"
 #include "fasteig_options.hpp"
 #include "parseinput.hpp"
 #include "fasteig_problem.hpp"
+//DMR
 
+#include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <string>
 #include <vector>
+
+namespace {
+
+std::string lower_copy(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return s;
+}
+
+}  // namespace
 
 int main(int argc, const char* argv[])
 {
@@ -36,6 +50,20 @@ int main(int argc, const char* argv[])
   // Option B: override/extend defaults with an explicit options object.
   fasteig_options opts;
   opts.configure_from(params);
+  const std::string exe_l = lower_copy(argv[0]);
+#ifdef FASTEIG_GPU_EXEC
+  const bool gpu_exec = true;
+#else
+  const bool gpu_exec = (exe_l.find("gpu") != std::string::npos);
+#endif
+  const std::string solver_l = lower_copy(opts.solver());
+  if (gpu_exec && (solver_l == "lanczos" || solver_l == "gpulanczos")) {
+    if (solver_l == "gpulanczos") {
+      opts.set("solver", "Lanczos");
+    }
+    opts.set_gpu_backend(true);
+  }
+  prob.set_executor(fasteig::core::make_executor(opts.gpu_backend()));
   // Example overrides:
   // opts.set("nev", "20");
   // opts.set("solver", "Chebyshev");
@@ -44,3 +72,4 @@ int main(int argc, const char* argv[])
   const FASTEIG_INT status = prob.solve(opts);
   return (status == 0) ? 0 : 2;
 }
+

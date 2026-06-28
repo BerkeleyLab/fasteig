@@ -3,64 +3,23 @@
 #ifdef USE_CUDA
 
 #include "gpu/CudaExecutor.hpp"
+#include "gpu/CudaMultiVector.hpp"
 #include "gpu/CudaVector.hpp"
 #include "gpu/CudaContext.hpp"
 #include "gpu/CudaCheck.hpp"
+#include "gpu/CudaUtils.hpp"
 
 #include <cuda_runtime.h>
 
 #include <cstdint>
 #include <stdexcept>
-#include <string>
 #include <utility>
 
 namespace fasteig {
 namespace core {
-namespace {
-
-void validate_csr_data(const CsrMatrixData& data) {
-  if (data.rows < 0 || data.cols < 0) {
-    throw std::invalid_argument("CsrMatrixData: dimensions must be nonnegative.");
-  }
-  if (data.rowptr.size() != static_cast<std::size_t>(data.rows + 1)) {
-    throw std::invalid_argument("CsrMatrixData: rowptr size must be rows + 1.");
-  }
-  if (data.colind.size() != data.values.size()) {
-    throw std::invalid_argument("CsrMatrixData: colind and values sizes differ.");
-  }
-  if (!data.rowptr.empty()) {
-    if (data.rowptr.front() != 0) {
-      throw std::invalid_argument("CsrMatrixData: rowptr must start at zero.");
-    }
-    if (data.rowptr.back() != static_cast<int>(data.values.size())) {
-      throw std::invalid_argument("CsrMatrixData: rowptr end must equal nnz.");
-    }
-  }
-  for (std::size_t i = 1; i < data.rowptr.size(); ++i) {
-    if (data.rowptr[i] < data.rowptr[i - 1]) {
-      throw std::invalid_argument("CsrMatrixData: rowptr must be nondecreasing.");
-    }
-  }
-  for (int col : data.colind) {
-    if (col < 0 || col >= data.cols) {
-      throw std::invalid_argument("CsrMatrixData: column index out of range.");
-    }
-  }
-}
-
-const CudaExecutor& cuda_executor_from(const Executor& exec, const char* where) {
-  const auto* cuda_exec = dynamic_cast<const CudaExecutor*>(&exec);
-  if (!cuda_exec) {
-    throw std::invalid_argument(std::string(where) + ": executor is not a CudaExecutor.");
-  }
-  return *cuda_exec;
-}
-
-}  // namespace
-
 CudaCsrMatrix::CudaCsrMatrix(const Executor& exec, CsrMatrixData data)
     : exec_(exec), rows_(data.rows), cols_(data.cols), nnz_(data.nonzeros()) {
-  validate_csr_data(data);
+  validate_csr_matrix_data(data);
 
   auto& context = cuda_executor_from(exec_, "CudaCsrMatrix").context();
   FASTEIG_CUDA_CHECK(cudaMalloc(&d_rowptr_, data.rowptr.size() * sizeof(int)));
@@ -127,17 +86,17 @@ CsrMatrixData CudaCsrMatrix::copy_to_host() const {
   return out;
 }
 
-void CudaCsrMatrix::spmv(const Vector& x, Vector& y, double alpha, double beta) const {
+void CudaCsrMatrix::apply(const Vector& x, Vector& y, double alpha, double beta) const {
   if (x.size() != cols_ || y.size() != rows_) {
-    throw std::invalid_argument("CudaCsrMatrix::spmv: dimension mismatch.");
+    throw std::invalid_argument("CudaCsrMatrix::apply: dimension mismatch.");
   }
   const auto* cuda_x = dynamic_cast<const CudaVector*>(&x);
   auto* cuda_y = dynamic_cast<CudaVector*>(&y);
   if (!cuda_x || !cuda_y) {
-    throw std::invalid_argument("CudaCsrMatrix::spmv: x and y must be CudaVector objects.");
+    throw std::invalid_argument("CudaCsrMatrix::apply: x and y must be CudaVector objects.");
   }
 
-  auto& context = cuda_executor_from(exec_, "CudaCsrMatrix::spmv").context();
+  auto& context = cuda_executor_from(exec_, "CudaCsrMatrix::apply").context();
   if (!x_descr_) {
     FASTEIG_CUSPARSE_CHECK(cusparseCreateDnVec(&x_descr_,
                                                static_cast<int64_t>(cols_),
@@ -175,7 +134,91 @@ void CudaCsrMatrix::spmv(const Vector& x, Vector& y, double alpha, double beta) 
                                       &beta, y_descr_, CUDA_R_64F,
                                       CUSPARSE_SPMV_ALG_DEFAULT,
                                       d_spmv_buffer_));
-  FASTEIG_CUDA_CHECK(cudaStreamSynchronize(context.stream()));
+}
+
+void CudaCsrMatrix::apply_column(const MultiVector& X,
+                                 FASTEIG_INT col,
+                                 Vector& y,
+                                 double alpha,
+                                 double beta) const {
+  if (col < 0 || col >= X.cols()) {
+    throw std::invalid_argument("CudaCsrMatrix::apply_column: column out of range.");
+  }
+  if (X.rows() != cols_ || y.size() != rows_) {
+    throw std::invalid_argument("CudaCsrMatrix::apply_column: dimension mismatch.");
+  }
+  const auto* cuda_X = dynamic_cast<const CudaMultiVector*>(&X);
+  auto* cuda_y = dynamic_cast<CudaVector*>(&y);
+  if (!cuda_X || !cuda_y) {
+    throw std::invalid_argument("CudaCsrMatrix::apply_column: X and y must be CUDA objects.");
+  }
+
+  const double* d_x = cuda_X->data() + static_cast<size_t>(col) * static_cast<size_t>(X.rows());
+  auto& context = cuda_executor_from(exec_, "CudaCsrMatrix::apply_column").context();
+  if (!x_descr_) {
+    FASTEIG_CUSPARSE_CHECK(cusparseCreateDnVec(&x_descr_,
+                                               static_cast<int64_t>(cols_),
+                                               const_cast<double*>(d_x),
+                                               CUDA_R_64F));
+  } else {
+    FASTEIG_CUSPARSE_CHECK(cusparseDnVecSetValues(x_descr_, const_cast<double*>(d_x)));
+  }
+
+  if (!y_descr_) {
+    FASTEIG_CUSPARSE_CHECK(cusparseCreateDnVec(&y_descr_,
+                                               static_cast<int64_t>(rows_),
+                                               cuda_y->data(),
+                                               CUDA_R_64F));
+  } else {
+    FASTEIG_CUSPARSE_CHECK(cusparseDnVecSetValues(y_descr_, cuda_y->data()));
+  }
+
+  if (!d_spmv_buffer_) {
+    FASTEIG_CUSPARSE_CHECK(cusparseSpMV_bufferSize(context.cusparse_handle(),
+                                                   CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                                   &alpha, mat_descr_, x_descr_,
+                                                   &beta, y_descr_, CUDA_R_64F,
+                                                   CUSPARSE_SPMV_ALG_DEFAULT,
+                                                   &spmv_buffer_size_));
+    if (spmv_buffer_size_ > 0) {
+      FASTEIG_CUDA_CHECK(cudaMalloc(&d_spmv_buffer_, spmv_buffer_size_));
+    }
+  }
+
+  FASTEIG_CUSPARSE_CHECK(cusparseSpMV(context.cusparse_handle(),
+                                      CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                      &alpha, mat_descr_, x_descr_,
+                                      &beta, y_descr_, CUDA_R_64F,
+                                      CUSPARSE_SPMV_ALG_DEFAULT,
+                                      d_spmv_buffer_));
+}
+
+void CudaCsrMatrix::apply_block(const MultiVector& X,
+                                FASTEIG_INT first_col,
+                                FASTEIG_INT block_size,
+                                MultiVector& Y,
+                                double alpha,
+                                double beta) const {
+  if (first_col < 0 || block_size <= 0 || first_col + block_size > X.cols()) {
+    throw std::invalid_argument("CudaCsrMatrix::apply_block: invalid column range.");
+  }
+  if (X.rows() != cols_ || Y.rows() != rows_ || Y.cols() < block_size) {
+    throw std::invalid_argument("CudaCsrMatrix::apply_block: dimension mismatch.");
+  }
+  const auto* cuda_X = dynamic_cast<const CudaMultiVector*>(&X);
+  auto* cuda_Y = dynamic_cast<CudaMultiVector*>(&Y);
+  if (!cuda_X || !cuda_Y) {
+    throw std::invalid_argument("CudaCsrMatrix::apply_block: X and Y must be CUDA objects.");
+  }
+
+  auto y = exec_.create_vector(rows_);
+  for (FASTEIG_INT j = 0; j < block_size; ++j) {
+    if (beta != 0.0) {
+      y->copy_from_host(Y.copy_column_to_host(j));
+    }
+    apply_column(X, first_col + j, *y, alpha, beta);
+    cuda_Y->copy_column_from(j, *y);
+  }
 }
 
 }  // namespace core

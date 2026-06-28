@@ -5,6 +5,8 @@
 #include "fasteig_logger.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <stdexcept>
 
 namespace fasteig {
 
@@ -86,6 +88,18 @@ FASTEIG_INT LOBPCGSolver::solve() {
   const FASTEIG_DOUBLE orth_tol = 1.0e-10;
   const int verbosity = options_.verbosity();
   const FASTEIG_INT print_every = options_.print_every();
+
+  if (options_.v0().size() > 0) {
+    if (options_.v0().rows() != eigvecs_.rows()) {
+      throw std::invalid_argument("LOBPCGSolver: v0 row count does not match problem dimension.");
+    }
+    eigvecs_.setRandom();
+    const int c = std::min<int>(options_.v0().cols(), static_cast<int>(nev));
+    eigvecs_.leftCols(c) = options_.v0().leftCols(c);
+  } else {
+    if (options_.seed().has_value()) std::srand(*options_.seed());
+    eigvecs_.setRandom();
+  }
 
   std::ostream* log = problem_.log_stream();
   reset_state(tol, orth_tol, verbosity, print_every, log);
@@ -556,3 +570,4 @@ bool LOBPCGSolver::modified_rayleigh_ritz() {
 }
 
 }  // namespace fasteig
+

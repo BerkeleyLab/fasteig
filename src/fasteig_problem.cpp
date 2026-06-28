@@ -1,5 +1,10 @@
 #include "fasteig_problem.hpp"
 
+#include "core/CsrMatrix.hpp"
+#include "core/Executor.hpp"
+#include "core/LinearOperator.hpp"
+#include "core/OperationsOperator.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -10,6 +15,21 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
+
+namespace {
+
+fasteig::core::CsrMatrixData make_core_csr_data(const fasteig_problem::CsrMatrixData& src,
+                                                FASTEIG_INT n) {
+  fasteig::core::CsrMatrixData out;
+  out.rows = n;
+  out.cols = n;
+  out.rowptr = src.rowptr;
+  out.colind = src.colind;
+  out.values = src.values;
+  return out;
+}
+
+}  // namespace
 
 // ------------------------
 // Constructors
@@ -163,6 +183,42 @@ void fasteig_problem::set_log_path(const std::string& path, bool append) {
   logger_.open(path, append);
 }
 
+std::shared_ptr<fasteig::core::Executor> fasteig_problem::executor(const fasteig_options& opts) {
+  if (!executor_) {
+    executor_ = fasteig::core::make_executor(opts.gpu_backend());
+  }
+  return executor_;
+}
+
+void fasteig_problem::set_executor(std::shared_ptr<fasteig::core::Executor> exec) {
+  if (!exec) {
+    throw std::invalid_argument("fasteig_problem::set_executor: null executor.");
+  }
+  executor_ = std::move(exec);
+}
+
+std::unique_ptr<fasteig::core::LinearOperator> fasteig_problem::make_linear_operator(
+    const fasteig_options& opts,
+    const fasteig::core::Executor& exec) const {
+  const bool use_sai = is_sai_which(opts.which());
+
+  if (exec.is_gpu()) {
+    if (use_sai) {
+      throw std::invalid_argument("fasteig_problem: CUDA executor does not support SAI Lanczos yet.");
+    }
+    if (!csrA_) {
+      throw std::invalid_argument("fasteig_problem: CUDA executor requires a stored CSR matrix.");
+    }
+    return exec.create_csr_matrix(make_core_csr_data(*csrA_, n_));
+  }
+
+  const operations& op = solver_ops(opts);
+  if (!op.matvec) {
+    throw std::invalid_argument("fasteig_problem: selected operator has no matvec.");
+  }
+  return std::make_unique<fasteig::core::CpuOperationsOperator>(exec, n_, op);
+}
+
 FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
   opts.validate();
   last_iterations_.reset();
@@ -171,12 +227,12 @@ FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
   const FASTEIG_INT n = n_;
 
   fasteig_options local = opts;
-  local.ensure_initial_vectors(n, nev);
   const operations& active_ops = solver_ops(local);
 
   eigvals_.resize(static_cast<int>(nev));
   resnrms_.resize(static_cast<int>(nev));
-  eigvecs_ = local.v0();
+  eigvecs_.resize(static_cast<int>(n), static_cast<int>(nev));
+  eigvecs_.setZero();
 
   std::string solver_name = local.solver().empty() ? solver_ : local.solver();
   if (solver_name.empty()) solver_name = "Lanczos";
@@ -214,6 +270,7 @@ FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
   }
 
   prepare(local);
+  executor(local);
 
   if (logger_.enabled()) {
     logger_.section("PROGRESS");

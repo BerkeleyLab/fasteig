@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <iostream>
 
 namespace fasteig {
@@ -43,6 +44,19 @@ FASTEIG_INT DavidsonSolver::solve() {
   const FASTEIG_INT nev = options_.nev();
   const FASTEIG_INT maxiter = options_.maxiter();
   const FASTEIG_INT maxblks = options_.maxblks();
+
+  if (options_.v0().size() > 0) {
+    if (options_.v0().rows() != eigvecs_.rows()) {
+      throw std::invalid_argument("DavidsonSolver: v0 row count does not match problem dimension.");
+    }
+    eigvecs_.setRandom();
+    const int c = std::min<int>(options_.v0().cols(), static_cast<int>(nev));
+    eigvecs_.leftCols(c) = options_.v0().leftCols(c);
+  } else {
+    if (options_.seed().has_value()) std::srand(*options_.seed());
+    eigvecs_.setRandom();
+  }
+
   const size_t nrows = eigvecs_.rows();
   const size_t ncols = eigvecs_.cols();
   int info = 0;
@@ -162,3 +176,4 @@ FASTEIG_INT DavidsonSolver::solve() {
 }
 
 }  // namespace fasteig
+

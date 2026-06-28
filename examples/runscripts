@@ -1,0 +1,20 @@
+For GPU
+=======
+export OMP_NUM_THREADS=16
+export MKL_NUM_THREADS=16
+export OMP_PLACES=cores
+export OMP_PROC_BIND=close
+export OMP_DYNAMIC=false
+export MKL_DYNAMIC=false
+srun -n 1 -c 16 --gpus-per-task=1 --gpu-bind=single:1 --cpu-bind=cores ./runfasteig_gpu SiO.input
+
+
+For CPU
+=======
+export OMP_NUM_THREADS=64
+export MKL_NUM_THREADS=64
+export OMP_PLACES=cores
+export OMP_PROC_BIND=spread
+export OMP_DYNAMIC=false
+export MKL_DYNAMIC=false
+srun -N 1 -n 1 -c 64 --cpu-bind=cores ./runfasteig_cpu SiO.input

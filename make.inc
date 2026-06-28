@@ -2,8 +2,9 @@
 MKLROOT = /opt/intel/oneapi/mkl/2023.1.0
 MKL = -L${MKLROOT}/lib/intel64 -Wl,-rpath ${MKLROOT}/lib/intel64 -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core -lgomp -lpthread -lm -ldl
 
-HOME = /global/cfs/cdirs/m1027/Dong/fasteig
-#HOME = /pscratch/sd/c/cyang/crd-fasteig
+# Repository root.  This works whether make.inc is included from the repo root,
+# src/, or examples/, and avoids accidentally linking against another checkout.
+HOME := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
 # MKL / Pardiso toggle
 # --------------------
@@ -59,4 +60,3 @@ RANLIB   = ranlib
 ECHO	 = echo
 
 AR = ar
-

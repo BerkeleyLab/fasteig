@@ -2,9 +2,10 @@
 
 #include "fasteig.hpp"
 
-#include <functional>
 #include <string>
 #include <vector>
+
+class fasteig_logger;
 
 namespace fasteig {
 
@@ -13,28 +14,6 @@ struct LanczosSnapshot {
   VectorXd rel_res;
   MatrixXd Csel;
 };
-
-struct LanczosConvergenceConfig {
-  FASTEIG_INT nev = 0;
-  FASTEIG_INT maxiter = 0;
-  FASTEIG_INT print_every = 0;
-  FASTEIG_INT silent_check_interval = 0;
-  FASTEIG_DOUBLE tol = 0.0;
-};
-
-struct LanczosConvergenceResult {
-  bool converged = false;
-  FASTEIG_INT it_stop = 0;
-  FASTEIG_INT last_emitted_iter = 0;
-  LanczosSnapshot final;
-};
-
-using LanczosAdvanceFn = std::function<FASTEIG_DOUBLE(FASTEIG_INT it)>;
-using LanczosSnapshotFn = std::function<LanczosSnapshot(FASTEIG_INT m,
-                                                        FASTEIG_DOUBLE beta_next,
-                                                        bool need_vectors)>;
-using LanczosEmitFn = std::function<void(const LanczosSnapshot& snapshot,
-                                         FASTEIG_INT iter_label)>;
 
 std::string lanczos_lower_copy(std::string s);
 
@@ -52,6 +31,12 @@ LanczosSnapshot lanczos_make_snapshot_from_eigendecomp(const VectorXd& eigenvalu
                                                        const std::string& which,
                                                        bool need_vectors);
 
+LanczosSnapshot lanczos_make_snapshot_from_eigenvalues_last_row(const VectorXd& eigenvalues,
+                                                               const VectorXd& eigenvector_last_row,
+                                                               FASTEIG_INT nev,
+                                                               FASTEIG_DOUBLE beta_next,
+                                                               const std::string& which);
+
 LanczosSnapshot lanczos_compute_cpu_snapshot(const MatrixXd& T,
                                              FASTEIG_INT m,
                                              FASTEIG_INT nev,
@@ -60,10 +45,10 @@ LanczosSnapshot lanczos_compute_cpu_snapshot(const MatrixXd& T,
                                              bool need_vectors,
                                              const char* solver_name);
 
-LanczosConvergenceResult run_lanczos_convergence_loop(const LanczosConvergenceConfig& config,
-                                                      const LanczosAdvanceFn& advance,
-                                                      const LanczosSnapshotFn& snapshot,
-                                                      const LanczosEmitFn& emit);
+void lanczos_emit_snapshot(const LanczosSnapshot& snapshot,
+                           FASTEIG_INT iter_label,
+                           fasteig_logger* log_logger,
+                           fasteig_logger* stdout_logger);
 
 }  // namespace fasteig
 

@@ -1,11 +1,16 @@
 #include "KrylovSchurSolver.hpp"
 
-#include "KrylovSubspace.hpp"
+#include "core/Executor.hpp"
+#include "core/KrylovSubspace.hpp"
+#include "core/LinearOperator.hpp"
+#include "core/MultiVector.hpp"
+#include "core/Vector.hpp"
 #include "fasteig_problem.hpp"
 #include "fasteig_logger.hpp"
 
 #include <cmath>
 #include <limits>
+#include <memory>
 
 namespace fasteig {
 
@@ -110,14 +115,7 @@ FASTEIG_INT KrylovSchurSolver::solve() {
   const int verbosity = options_.verbosity();
   const FASTEIG_INT print_every = options_.print_every();
 
-  VectorXd v0;
-  if (options_.v0().size() > 0) {
-    v0 = options_.v0().col(0);
-  } else {
-    v0 = VectorXd::Random(n);
-  }
-
-  const size_t n_sz = static_cast<size_t>(v0.size());
+  const size_t n_sz = static_cast<size_t>(n);
 
   if (nev == 0) {
     throw std::runtime_error("Desired number of eigenpairs should be larger than 0");
@@ -159,7 +157,12 @@ FASTEIG_INT KrylovSchurSolver::solve() {
   H.setZero();
 
   FASTEIG_DOUBLE beta;
-  VectorXd f = v0;
+  VectorXd f;
+  if (options_.v0().size() > 0) {
+    f = options_.v0().col(0);
+  } else {
+    f = VectorXd::Random(n);
+  }
   FASTEIG_SIZET sai = 0;
 
   const bool generalized = (problem_.bmatrix() != nullptr);
@@ -167,19 +170,36 @@ FASTEIG_INT KrylovSchurSolver::solve() {
     throw std::invalid_argument("KrylovSchur: generalized eigenproblems do not support which=SAI.");
   }
 
+  std::shared_ptr<core::Executor> exec;
+  std::unique_ptr<core::LinearOperator> op;
+  std::unique_ptr<core::Vector> residual;
+  std::unique_ptr<core::Vector> operator_result;
+  std::unique_ptr<core::MultiVector> basis;
+  const unsigned int base_seed = options_.seed().value_or(1u);
+
+  auto build_standard_krylov = [&](size_t begin, size_t end) {
+    if (!exec) {
+      exec = problem_.executor(options_);
+      op = problem_.make_linear_operator(options_, *exec);
+      residual = exec->create_vector(f);
+      operator_result = exec->create_vector(n);
+      basis = exec->create_multivector(n, static_cast<FASTEIG_INT>(k));
+    } else {
+      residual->copy_from_host(f);
+    }
+
+    basis->copy_from_host(Q);
+    core::KrylovSubspace krylov(*op, *residual, *operator_result, *basis, H, base_seed);
+    krylov.build(static_cast<FASTEIG_INT>(begin), static_cast<FASTEIG_INT>(end));
+    f = residual->copy_to_host();
+    Q = basis->copy_to_host();
+  };
+
   if (which_lower == "sai") {
-    KrylovSubspace krylov(f, Q, H);
-    krylov.build(opsSAI_, 0, k);
-    f = krylov.KrylovResidual();
-    Q = krylov.OrthoBasis();
-    H = krylov.ProjectedMatrix();
+    build_standard_krylov(0, k);
     sai = 1;
   } else if (!generalized) {
-    KrylovSubspace krylov(f, Q, H);
-    krylov.build(opsA_, 0, k);
-    f = krylov.KrylovResidual();
-    Q = krylov.OrthoBasis();
-    H = krylov.ProjectedMatrix();
+    build_standard_krylov(0, k);
   } else {
     BQ.resize(static_cast<int>(n_sz), static_cast<int>(k));
     BQ.setZero();
@@ -334,17 +354,9 @@ FASTEIG_INT KrylovSchurSolver::solve() {
     }
 
     if (which_lower == "sai") {
-      KrylovSubspace krylov(f, Q, H);
-      krylov.build(opsSAI_, current_nev, k);
-      f = krylov.KrylovResidual();
-      Q = krylov.OrthoBasis();
-      H = krylov.ProjectedMatrix();
+      build_standard_krylov(current_nev, k);
     } else if (!generalized) {
-      KrylovSubspace krylov(f, Q, H);
-      krylov.build(opsA_, current_nev, k);
-      f = krylov.KrylovResidual();
-      Q = krylov.OrthoBasis();
-      H = krylov.ProjectedMatrix();
+      build_standard_krylov(current_nev, k);
     } else {
       // Update cached BQ for the restarted basis before expansion.
       if (!opsB_.block_matvec) {
@@ -361,3 +373,4 @@ FASTEIG_INT KrylovSchurSolver::solve() {
 }
 
 }  // namespace fasteig
+

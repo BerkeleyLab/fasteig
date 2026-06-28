@@ -11,36 +11,6 @@
 
 class fasteig_problem;
 
-struct fasteig_gpu_lanczos_timings {
-  bool use_gpu_snapshot = true;
-  bool use_cpu_orthog = false;
-  long long matvec_calls = 0;
-  double setup_sec = 0.0;
-  double context_sec = 0.0;
-  double matrix_setup_sec = 0.0;
-  double device_alloc_sec = 0.0;
-  double snapshot_setup_sec = 0.0;
-  double initial_h2d_sec = 0.0;
-  double spmv_sec = 0.0;
-  double orthog_sec = 0.0;
-  double t_update_sec = 0.0;
-  double cpu_orthog_transfer_sec = 0.0;
-  double krylov_total_sec = 0.0;
-  double gpu_loop_event_sec = 0.0;
-  double snapshot_sec = 0.0;
-  double snapshot_h2d_sec = 0.0;
-  double snapshot_t_d2h_sec = 0.0;
-  double snapshot_t_d2d_sec = 0.0;
-  double snapshot_kernel_sec = 0.0;
-  double snapshot_d2h_sec = 0.0;
-  double ritz_h2d_sec = 0.0;
-  double ritz_gemm_sec = 0.0;
-  double ritz_d2h_sec = 0.0;
-  double eigvec_sec = 0.0;
-  double transfer_sec = 0.0;
-  double residual_sec = 0.0;
-};
-
 class fasteig_logger {
 public:
   fasteig_logger() = default;
@@ -86,8 +56,6 @@ public:
                         std::optional<double> runtime_sec = std::nullopt);
 
   void print_matrix_summary(const fasteig_problem& problem);
-
-  void print_gpu_lanczos_timings(const fasteig_gpu_lanczos_timings& timings);
 
   void print_final_results(FASTEIG_INT status,
                            const VectorXd& eigvals,

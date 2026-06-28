@@ -25,15 +25,37 @@ public:
   void copy_from(const MultiVector& src) override;
   void set_zero() override;
   void scale(double alpha) override;
+  void copy_column_from(FASTEIG_INT col, const Vector& src) override;
+  VectorXd copy_column_to_host(FASTEIG_INT col) const override;
+  double column_dot(FASTEIG_INT col, const Vector& x) const override;
+  void column_axpy(double alpha, FASTEIG_INT col, Vector& y) const override;
+  double orthogonalize_active_columns(FASTEIG_INT active_cols,
+                                      const Vector& source,
+                                      Vector& residual) const override;
+  void orthogonalize_active_columns(FASTEIG_INT active_cols,
+                                    const Vector& source,
+                                    Vector& residual,
+                                    std::vector<double>& coeffs) const override;
+
+  void orthogonalize_active_columns_device_coeffs(FASTEIG_INT active_cols,
+                                                  const Vector& source,
+                                                  Vector& residual,
+                                                  double* d_coeffs,
+                                                  double* d_correction) const;
 
   double* data() noexcept { return d_values_; }
   const double* data() const noexcept { return d_values_; }
 
 private:
+  void ensure_orthog_workspace(FASTEIG_INT active_cols) const;
+
   const Executor& exec_;
   FASTEIG_INT rows_ = 0;
   FASTEIG_INT cols_ = 0;
   double* d_values_ = nullptr;
+  mutable double* d_h_ = nullptr;
+  mutable double* d_s_ = nullptr;
+  mutable FASTEIG_INT orthog_workspace_cols_ = 0;
 };
 
 }  // namespace core
