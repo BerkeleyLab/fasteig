@@ -1,6 +1,7 @@
 #pragma once
 
 #include "fasteig.hpp"
+#include "core/LinearOperator.hpp"
 #include "fasteig_logger.hpp"
 #include "fasteig_options.hpp"
 #include "fasteig_solver.hpp"
@@ -17,7 +18,6 @@
 namespace fasteig {
 namespace core {
 class Executor;
-class LinearOperator;
 }  // namespace core
 }  // namespace fasteig
 
@@ -76,13 +76,16 @@ public:
 
   std::shared_ptr<fasteig::core::Executor> executor(const fasteig_options& opts);
   void set_executor(std::shared_ptr<fasteig::core::Executor> exec);
+  void prepare_linear_operator(const fasteig_options& opts,
+                               const fasteig::core::Executor& exec);
   std::unique_ptr<fasteig::core::LinearOperator> make_linear_operator(
       const fasteig_options& opts,
-      const fasteig::core::Executor& exec) const;
+      const fasteig::core::Executor& exec);
 
-  // Generalized eigenproblem setup (currently: factorize B once for KrylovSchur).
+  // Solver setup that needs explicit factorizations (SAI and generalized B).
   void prepare(const fasteig_options& opts);
   std::optional<double> b_factorization_sec() const noexcept { return b_factorization_sec_; }
+  std::optional<double> sai_factorization_sec() const noexcept { return sai_factorization_sec_; }
 
   // Logging/progress output.
   void open_log(const fasteig_options& opts,
@@ -121,8 +124,10 @@ private:
 
   void build_default_ops_from_H(operations& target_ops);
   void build_default_ops_from_B(operations& target_ops);
-  void build_sai_ops_from_H(const fasteig_params& p);
   void build_csr_from_H();
+  std::unique_ptr<fasteig::core::LinearOperator> build_linear_operator(
+      const fasteig_options& opts,
+      const fasteig::core::Executor& exec);
   static bool is_sai_which(const std::string& which);
   void set_sppc_split(operations& target_ops, FASTEIG_INT ns);
 
@@ -138,6 +143,7 @@ private:
   operations opsB_{};
   operations opsSAI_{};
   std::shared_ptr<fasteig::core::Executor> executor_;
+  std::unique_ptr<fasteig::core::LinearOperator> prepared_operator_;
   FASTEIG_INT n_ = 0;
 
   FASTEIG_INT ns_ = 0;
@@ -146,6 +152,11 @@ private:
   bool b_triangle_upper_for_ops_ = true;  // effective stored triangle for B when using selfadjointView
   bool b_factorized_ = false;
   std::optional<double> b_factorization_sec_;
+  bool sai_factorized_ = false;
+  FASTEIG_DOUBLE sai_shift_ = 0.0;
+  std::optional<double> sai_analysis_sec_;
+  std::optional<double> sai_factorization_sec_;
+  std::optional<double> sai_setup_sec_;
 
 #ifdef EIGEN_USE_MKL_ALL
   Eigen::PardisoLDLT<SpMat, Eigen::Lower> ldlt_;  // MKL PARDISO LDLT

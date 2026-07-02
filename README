@@ -13,20 +13,69 @@ make lib
 
 to generate a libfasteig_$(PLAT).a where PLAT is a user defined Platform name, e.g., Perlmutter
 
+## Perlmutter notes (MKL vs Eigen)
+
+By default, `make.inc` enables Eigen's MKL integration (`-DEIGEN_USE_MKL_ALL`) and links MKL.
+
+To build **without** MKL/Pardiso (use Eigen's own sparse factorization), override `USE_MKL` and
+avoid linking MKL when building examples:
+
+make -C src clean
+make -C src MAKEINC=../make.inc USE_MKL=""
+
+make -C examples clean
+make -C examples MAKEINC=../make.inc USE_MKL="" MKL=""
+
+When running a generalized problem, the log will print the factorization backend:
+  - `MKL PardisoLDLT` (MKL enabled)
+  - `Eigen SimplicialLDLT` (MKL disabled)
 
 To run some examples
 
 
 cd examples
 
-make 
+make
 
-generates an executable called 'runfasteig'
+generates a CPU executable called 'runfasteig_cpu'. With CUDA enabled
+(`make USE_CUDA=1` and `make -C examples USE_CUDA=1`), the examples build
+also generates 'runfasteig_gpu'.
 
 Run the executable by the following command
 
 
-./runfasteig  SiO.input
+./runfasteig_cpu  SiO.input
+
+For Lanczos, the CPU and GPU executables use the same input deck. Keep
+`solver Lanczos` in the input file and select the backend by executable:
+
+./runfasteig_cpu  SiO.input
+./runfasteig_gpu  SiO.input
+
+The GPU executable currently dispatches `solver Lanczos` to the CUDA Lanczos
+backend. Other solvers still use the CPU implementations. The CUDA Lanczos
+backend supports standard stored matrix problems. CUDA `which SAI` additionally
+requires NVIDIA cuDSS.
+
+### Optional project-space cuDSS install
+
+If Perlmutter does not provide a cuDSS module, try installing cuDSS into project
+space:
+
+```
+tools/install_cudss.sh --prefix /global/cfs/cdirs/m1027/Dong/cudss
+source /global/cfs/cdirs/m1027/Dong/cudss/cudss-env.sh
+make -C examples USE_CUDA=1 CUDSS_PATH=$CUDSS_PATH CUDSS_LIBDIR=$CUDSS_LIBDIR
+```
+
+If pip cannot download cuDSS on Perlmutter, download the Linux cuDSS archive from
+NVIDIA and extract it with:
+
+```
+tools/install_cudss.sh --prefix /global/cfs/cdirs/m1027/Dong/cudss --tarball /path/to/cudss-linux-*.tar.*
+source /global/cfs/cdirs/m1027/Dong/cudss/cudss-env.sh
+make -C examples USE_CUDA=1 CUDSS_PATH=$CUDSS_PATH CUDSS_LIBDIR=$CUDSS_LIBDIR
+```
 
 where SiO.input is an input file that contains a list of problem descriptions
 
@@ -40,3 +89,4 @@ maxiter 10
 maxdim  20
 degree  8
 tol     1e-6
+

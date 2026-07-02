@@ -8,8 +8,9 @@ include $(MAKEINC)
 #   make -C examples MAKEINC=../make.inc USE_MKL="" MKL=""
 # Force recompilation when the selected toolchain/config changes (e.g. Perlmutter -> Mac).
 BUILD_TAG_FILE = .fasteig_build_tag
-$(BUILD_TAG_FILE):
-	@{ echo "PLAT=$(PLAT)"; echo "CXX=$(CXX)"; echo "CXXFLAGS=$(CXXFLAGS)"; } > $@.tmp
+.PHONY: force_build_tag
+$(BUILD_TAG_FILE): force_build_tag
+	@{ echo "PLAT=$(PLAT)"; echo "CXX=$(CXX)"; echo "CXXFLAGS=$(CXXFLAGS)"; echo "USE_CUDA=$(USE_CUDA)"; echo "CUDA_PATH=$(CUDA_PATH)"; echo "USE_CUDSS=$(USE_CUDSS)"; echo "CUDSS_PATH=$(CUDSS_PATH)"; echo "CUDSS_LIBDIR=$(CUDSS_LIBDIR)"; echo "CUDSS_LIB_NAME=$(CUDSS_LIB_NAME)"; } > $@.tmp
 	@cmp -s $@ $@.tmp 2>/dev/null && rm -f $@.tmp || mv $@.tmp $@
 EXECUTABLES = runfasteig_cpu
 ifeq ($(USE_CUDA),1)
@@ -21,7 +22,7 @@ all: $(EXECUTABLES)
 # directory, so relying only on its timestamp easily links stale src objects.
 .PHONY: libfasteig
 libfasteig:
-	$(MAKE) -C ../src MAKEINC=$(MAKEINC) USE_CUDA=$(USE_CUDA)
+	$(MAKE) -C ../src MAKEINC=$(MAKEINC) USE_MKL="$(USE_MKL)" MKL="$(MKL)" USE_CUDA=$(USE_CUDA) USE_CUDSS=$(USE_CUDSS) CUDSS_PATH=$(CUDSS_PATH) CUDSS_LIBDIR=$(CUDSS_LIBDIR) CUDSS_LIB_NAME=$(CUDSS_LIB_NAME)
 # Pattern rule for creating executables
 runfasteig_cpu: runfasteig_cpu.o libfasteig
 	$(CXX) $< $(LIBFASTEIG) $(LDFLAGS) $(MKL) $(if $(filter 1,$(USE_CUDA)),$(CUDA_LIBS),) -o $@
@@ -38,6 +39,6 @@ runfasteig_gpu.o: runfasteig.cpp $(BUILD_TAG_FILE)
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $<
 # Clean target
 clean:
-	rm -f runfasteig runfasteig_cpu runfasteig_gpu *.o *.d
+	rm -f runfasteig runfasteig_cpu runfasteig_gpu *.o *.d $(BUILD_TAG_FILE)
 -include *.d
 

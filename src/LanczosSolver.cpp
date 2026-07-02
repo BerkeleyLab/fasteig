@@ -99,13 +99,16 @@ FASTEIG_INT LanczosSolver::solve() {
     }
   }
 
-  if (lanczos_workspace->needs_host_basis_for_ritz_vectors()) {
+  if (lanczos_workspace->needs_host_basis_for_ritz_vectors() || which == "sai") {
     V = basis->copy_to_host();
   }
 
   if (which == "sai") {
     const FASTEIG_DOUBLE shift = options_.shift();
     std::vector<size_t> Ind(nev, 0);
+    if (V.cols() < it_stop || final.Csel.rows() < it_stop || final.Csel.cols() < nev) {
+      throw std::runtime_error("LanczosSolver: SAI Ritz-vector assembly has inconsistent basis dimensions.");
+    }
 
     for (size_t j = 0; j < static_cast<size_t>(nev); ++j) {
       final.lam(static_cast<int>(j)) = 1.0 / final.lam(static_cast<int>(j)) + shift;

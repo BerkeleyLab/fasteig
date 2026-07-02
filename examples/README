@@ -1,0 +1,48 @@
+Type `make` to generate the CPU executable `runfasteig_cpu`.
+With `USE_CUDA=1`, `runfasteig_gpu` is also built.
+CPU/GPU executable behavior:
+- Use the same input deck for CPU and GPU runs.
+- Keep `solver Lanczos` in the input deck.
+- Run `./runfasteig_cpu inputfile` to use the CPU Lanczos backend.
+- Run `./runfasteig_gpu inputfile` to use the CUDA Lanczos backend.
+- The CUDA backend currently supports stored MatrixMarket/CSR Lanczos problems.
+  Generalized problems (`bmatrix`) and matrix-free Lanczos should be run with
+  `runfasteig_cpu` for now. CUDA `which SAI` requires NVIDIA cuDSS.
+macOS quick start (local build)
+1) Install Eigen headers (Homebrew):
+   `brew install eigen`
+2) (Recommended) Enable OpenMP:
+   `brew install libomp`
+2) Build the library and the example:
+   - From repo root (examples will build the library automatically):
+     `make -C examples MAKEINC=../make.inc.mac`
+3) Run:
+   `./runfasteig_cpu SiO.input`
+Perlmutter GPU quick start:
+  `make USE_CUDA=1`
+  `make -C examples USE_CUDA=1`
+  `./runfasteig_gpu SiO.input`
+CUDA `which SAI` requires NVIDIA cuDSS. If no cuDSS module is available, install
+cuDSS into the checkout from the repo root:
+  `tools/install_cudss.sh`
+  `make -C examples USE_CUDA=1`
+If pip download is unavailable, download the Linux cuDSS archive from NVIDIA and
+run:
+  `tools/install_cudss.sh --tarball /path/to/cudss-linux-*.tar.*`
+The default makefile checks for the checkout-local install automatically. On
+Perlmutter, a shared project-space install such as
+`/global/cfs/cdirs/m1027/Dong/cudss` is also auto-detected when the checkout is
+under `/global/cfs/cdirs/m1027/Dong/`. For any other custom cuDSS location,
+source the generated `cudss-env.sh` or pass `CUDSS_PATH` and `CUDSS_LIBDIR`
+explicitly.
+If Eigen is installed somewhere else, override `EIGEN`:
+  `make -C examples MAKEINC=../make.inc.mac EIGEN=/path/to/eigen3`
+On Linux/UNIX, run the executable by typing
+./runfasteig_cpu
+for example
+./runfasteig_cpu SiO.input
+On windows, run the executable by using a batch script to set OpenMP environment properly.
+runfasteig.bat SiO.input
+runs on a single thread unless the environmental variable FASTEIG_THREADS is larger than 1. This can be done by
+set FASTEIG_THREADS=4
+
