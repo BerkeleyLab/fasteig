@@ -134,6 +134,7 @@ protected:
 // Concrete solvers live in their own headers/cpps:
 //   include/*Solver.hpp + src/*Solver.cpp
 class BlockLanczosSolver;
+class BlockKrylovSchurSolver;
 class KrylovSchurSolver;
 class DavidsonSolver;
 class LOBPCGSolver;
@@ -146,4 +147,3 @@ std::unique_ptr<fasteig_solver> make_fasteig_solver(const std::string& solver,
                                                     const fasteig_options& options);
 
 }  // namespace fasteig
-

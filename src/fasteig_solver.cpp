@@ -3,6 +3,7 @@
 #include "fasteig_solver.hpp"
 
 #include "BlockLanczosSolver.hpp"
+#include "BlockKrylovSchurSolver.hpp"
 #include "ChebyshevSolver.hpp"
 #include "DavidsonSolver.hpp"
 #include "KrylovSchurSolver.hpp"
@@ -137,6 +138,9 @@ std::unique_ptr<fasteig_solver> make_fasteig_solver(const std::string& solver,
   if (has_prefix(solver, "BlockLanczos", 8)) {
     return std::make_unique<BlockLanczosSolver>(problem, options);
   }
+  if (has_prefix(solver, "BlockKrylovSchur", 11)) {
+    return std::make_unique<BlockKrylovSchurSolver>(problem, options);
+  }
   if (has_prefix(solver, "KrylovSchur", 7)) {
     return std::make_unique<KrylovSchurSolver>(problem, options);
   }
@@ -159,7 +163,7 @@ std::unique_ptr<fasteig_solver> make_fasteig_solver(const std::string& solver,
     return nullptr;
   }
 
-  std::cerr << "Must choose a valid solver (Lanczos, BlockLanczos, KrylovSchur, Davidson, "
+  std::cerr << "Must choose a valid solver (Lanczos, BlockLanczos, BlockKrylovSchur, KrylovSchur, Davidson, "
                "LOBPCG, Chebyshev, SPPC, RMM-DIIS or auto)\n";
   return nullptr;
 }
@@ -249,4 +253,3 @@ void fasteig_solver::RayleighRitz(const operations& ops,
 }
 
 }  // namespace fasteig
-
