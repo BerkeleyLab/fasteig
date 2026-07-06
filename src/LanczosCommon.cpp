@@ -139,6 +139,42 @@ LanczosSnapshot lanczos_compute_cpu_snapshot(const MatrixXd& T,
                                                nev, beta_next, which, need_vectors);
 }
 
+LanczosSnapshot lanczos_prepare_final_snapshot(const LanczosSnapshot& snapshot,
+                                               const std::string& which,
+                                               FASTEIG_DOUBLE shift,
+                                               const char* solver_name) {
+  if (which != "sai") return snapshot;
+  if (snapshot.Csel.cols() != snapshot.lam.size()) {
+    throw std::invalid_argument(std::string(solver_name) +
+                                ": SAI final snapshot has inconsistent dimensions.");
+  }
+
+  VectorXd transformed(snapshot.lam.size());
+  for (int j = 0; j < snapshot.lam.size(); ++j) {
+    if (snapshot.lam(j) == 0.0) {
+      throw std::runtime_error(std::string(solver_name) +
+                               ": SAI encountered a zero shift-invert Ritz value.");
+    }
+    transformed(j) = 1.0 / snapshot.lam(j) + shift;
+  }
+
+  const std::vector<size_t> indices = sort_indices(transformed, "sr");
+  LanczosSnapshot out;
+  out.lam.resize(transformed.size());
+  out.rel_res.resize(snapshot.rel_res.size());
+  out.Csel.resize(snapshot.Csel.rows(), snapshot.Csel.cols());
+
+  for (int j = 0; j < transformed.size(); ++j) {
+    const int idx = static_cast<int>(indices[static_cast<std::size_t>(j)]);
+    out.lam(j) = transformed(idx);
+    if (j < out.rel_res.size() && idx < snapshot.rel_res.size()) {
+      out.rel_res(j) = snapshot.rel_res(idx);
+    }
+    out.Csel.col(j) = snapshot.Csel.col(idx);
+  }
+  return out;
+}
+
 void lanczos_emit_snapshot(const LanczosSnapshot& snapshot,
                            FASTEIG_INT iter_label,
                            fasteig_logger* log_logger,

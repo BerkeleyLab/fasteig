@@ -29,13 +29,12 @@ public:
                                            bool need_vectors,
                                            const char* solver_name) = 0;
 
-  virtual bool needs_host_basis_for_ritz_vectors() const noexcept = 0;
-
   virtual void finalize_eigenpairs(const LinearOperator& op,
                                    const MultiVector& basis,
-                                   const MatrixXd& host_basis,
                                    FASTEIG_INT active_cols,
                                    const LanczosSnapshot& snapshot,
+                                   const std::string& which,
+                                   FASTEIG_DOUBLE shift,
                                    VectorXd& eigvals,
                                    MatrixXd& eigvecs,
                                    VectorXd& residual_norms) = 0;
@@ -56,13 +55,12 @@ public:
                                    bool need_vectors,
                                    const char* solver_name) override;
 
-  bool needs_host_basis_for_ritz_vectors() const noexcept override { return true; }
-
   void finalize_eigenpairs(const LinearOperator& op,
                            const MultiVector& basis,
-                           const MatrixXd& host_basis,
                            FASTEIG_INT active_cols,
                            const LanczosSnapshot& snapshot,
+                           const std::string& which,
+                           FASTEIG_DOUBLE shift,
                            VectorXd& eigvals,
                            MatrixXd& eigvecs,
                            VectorXd& residual_norms) override;

@@ -45,6 +45,11 @@ LanczosSnapshot lanczos_compute_cpu_snapshot(const MatrixXd& T,
                                              bool need_vectors,
                                              const char* solver_name);
 
+LanczosSnapshot lanczos_prepare_final_snapshot(const LanczosSnapshot& snapshot,
+                                               const std::string& which,
+                                               FASTEIG_DOUBLE shift,
+                                               const char* solver_name);
+
 void lanczos_emit_snapshot(const LanczosSnapshot& snapshot,
                            FASTEIG_INT iter_label,
                            fasteig_logger* log_logger,

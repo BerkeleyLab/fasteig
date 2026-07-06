@@ -142,19 +142,23 @@ LanczosSnapshot CudaLanczosWorkspace::compute_snapshot(FASTEIG_INT m,
 
 void CudaLanczosWorkspace::finalize_eigenpairs(const LinearOperator& op,
                                                const MultiVector& basis,
-                                               const MatrixXd&,
                                                FASTEIG_INT active_cols,
                                                const LanczosSnapshot& snapshot,
+                                               const std::string& which,
+                                               FASTEIG_DOUBLE shift,
                                                VectorXd& eigvals,
                                                MatrixXd& eigvecs,
                                                VectorXd& residual_norms) {
+  LanczosSnapshot final =
+      lanczos_prepare_final_snapshot(snapshot, which, shift, "CudaLanczosWorkspace");
+
   if (active_cols <= 0 || active_cols > maxiter_) {
     throw std::invalid_argument("CudaLanczosWorkspace::finalize_eigenpairs: invalid active column count.");
   }
-  if (snapshot.Csel.rows() != active_cols) {
+  if (final.Csel.rows() != active_cols) {
     throw std::invalid_argument("CudaLanczosWorkspace::finalize_eigenpairs: Csel row mismatch.");
   }
-  if (snapshot.Csel.cols() > nev_) {
+  if (final.Csel.cols() > nev_) {
     throw std::invalid_argument("CudaLanczosWorkspace::finalize_eigenpairs: Csel has too many columns.");
   }
 
@@ -164,14 +168,14 @@ void CudaLanczosWorkspace::finalize_eigenpairs(const LinearOperator& op,
   }
 
   auto& context = cuda_executor_from(exec_, "CudaLanczosWorkspace::finalize_eigenpairs").context();
-  const int final_nev = static_cast<int>(snapshot.Csel.cols());
-  eigvals = snapshot.lam;
+  const int final_nev = static_cast<int>(final.Csel.cols());
+  eigvals = final.lam;
   eigvecs.resize(static_cast<int>(n_), final_nev);
   residual_norms.resize(final_nev);
   if (final_nev == 0) return;
 
   FASTEIG_CUDA_CHECK(cudaMemcpyAsync(
-      d_Csel_, snapshot.Csel.data(),
+      d_Csel_, final.Csel.data(),
       static_cast<std::size_t>(active_cols) * static_cast<std::size_t>(final_nev) * sizeof(double),
       cudaMemcpyHostToDevice, context.stream()));
 
@@ -182,6 +186,16 @@ void CudaLanczosWorkspace::finalize_eigenpairs(const LinearOperator& op,
                                    &one, cuda_basis->data(), static_cast<int>(n_),
                                    d_Csel_, static_cast<int>(active_cols),
                                    &zero, d_ritz_, static_cast<int>(n_)));
+
+  if (which == "sai") {
+    residual_norms.setZero();
+    FASTEIG_CUDA_CHECK(cudaMemcpyAsync(
+        eigvecs.data(), d_ritz_,
+        static_cast<std::size_t>(n_) * static_cast<std::size_t>(final_nev) * sizeof(double),
+        cudaMemcpyDeviceToHost, context.stream()));
+    FASTEIG_CUDA_CHECK(cudaStreamSynchronize(context.stream()));
+    return;
+  }
 
   auto x = op.executor().create_vector(n_);
   auto y = op.executor().create_vector(n_);

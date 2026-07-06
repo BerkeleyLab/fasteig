@@ -48,22 +48,31 @@ LanczosSnapshot CpuLanczosWorkspace::compute_snapshot(FASTEIG_INT m,
 
 void CpuLanczosWorkspace::finalize_eigenpairs(const LinearOperator& op,
                                               const MultiVector& basis,
-                                              const MatrixXd& host_basis,
                                               FASTEIG_INT active_cols,
                                               const LanczosSnapshot& snapshot,
+                                              const std::string& which,
+                                              FASTEIG_DOUBLE shift,
                                               VectorXd& eigvals,
                                               MatrixXd& eigvecs,
                                               VectorXd& residual_norms) {
+  MatrixXd host_basis = basis.copy_to_host();
+  LanczosSnapshot final =
+      lanczos_prepare_final_snapshot(snapshot, which, shift, "CpuLanczosWorkspace");
+
   if (active_cols < 0 || active_cols > host_basis.cols()) {
     throw std::invalid_argument("CpuLanczosWorkspace::finalize_eigenpairs: invalid active column count.");
   }
-  if (snapshot.Csel.rows() != active_cols) {
+  if (final.Csel.rows() != active_cols) {
     throw std::invalid_argument("CpuLanczosWorkspace::finalize_eigenpairs: Csel row mismatch.");
   }
 
-  eigvals = snapshot.lam;
-  eigvecs.noalias() = host_basis.leftCols(static_cast<int>(active_cols)) * snapshot.Csel;
+  eigvals = final.lam;
+  eigvecs.noalias() = host_basis.leftCols(static_cast<int>(active_cols)) * final.Csel;
   residual_norms.resize(eigvals.size());
+  if (which == "sai") {
+    residual_norms.setZero();
+    return;
+  }
 
   auto x = basis.executor().create_vector(op.cols());
   auto y = basis.executor().create_vector(op.rows());
