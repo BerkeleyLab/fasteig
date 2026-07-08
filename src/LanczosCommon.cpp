@@ -139,6 +139,118 @@ LanczosSnapshot lanczos_compute_cpu_snapshot(const MatrixXd& T,
                                                nev, beta_next, which, need_vectors);
 }
 
+LanczosSnapshot block_lanczos_compute_cpu_snapshot(const MatrixXd& T,
+                                                   FASTEIG_INT block_count,
+                                                   FASTEIG_INT block_size,
+                                                   FASTEIG_INT nev,
+                                                   const MatrixXd& beta,
+                                                   const std::string& which,
+                                                   bool need_vectors,
+                                                   const char* solver_name) {
+  if (block_count <= 0) {
+    throw std::invalid_argument(std::string(solver_name) + ": block snapshot count must be > 0.");
+  }
+  if (block_size <= 0) {
+    throw std::invalid_argument(std::string(solver_name) + ": block size must be > 0.");
+  }
+  if (beta.rows() != block_size || beta.cols() != block_size) {
+    throw std::invalid_argument(std::string(solver_name) + ": block snapshot beta shape mismatch.");
+  }
+
+  const FASTEIG_INT m = block_count * block_size;
+  if (T.rows() < m || T.cols() < m) {
+    throw std::invalid_argument(std::string(solver_name) + ": block snapshot matrix is too small.");
+  }
+
+  const int m_i = static_cast<int>(m);
+  Eigen::SelfAdjointEigenSolver<MatrixXd> solver(T.topLeftCorner(m_i, m_i));
+  return block_lanczos_make_snapshot_from_eigendecomp(
+      solver.eigenvalues(), solver.eigenvectors(), block_size, nev, beta, which,
+      need_vectors, solver_name);
+}
+
+LanczosSnapshot block_lanczos_make_snapshot_from_eigendecomp(const VectorXd& eigenvalues,
+                                                             const MatrixXd& eigenvectors,
+                                                             FASTEIG_INT block_size,
+                                                             FASTEIG_INT nev,
+                                                             const MatrixXd& beta,
+                                                             const std::string& which,
+                                                             bool need_vectors,
+                                                             const char* solver_name) {
+  const int m = static_cast<int>(eigenvalues.size());
+  if (m <= 0) {
+    throw std::invalid_argument(std::string(solver_name) + ": no block Ritz values.");
+  }
+  if (block_size <= 0 || m < block_size) {
+    throw std::invalid_argument(std::string(solver_name) + ": invalid block size.");
+  }
+  if (eigenvectors.rows() != m || eigenvectors.cols() != m) {
+    throw std::invalid_argument(std::string(solver_name) + ": block eigenvector dimension mismatch.");
+  }
+  if (beta.rows() != block_size || beta.cols() != block_size) {
+    throw std::invalid_argument(std::string(solver_name) + ": block beta shape mismatch.");
+  }
+
+  MatrixXd last_block(static_cast<int>(block_size), m);
+  last_block = eigenvectors.bottomRows(static_cast<int>(block_size));
+  LanczosSnapshot out = block_lanczos_make_snapshot_from_eigenvalues_last_block(
+      eigenvalues, last_block, block_size, nev, beta, which, solver_name);
+
+  if (need_vectors) {
+    out.Csel.resize(m, out.lam.size());
+    const std::vector<size_t> indices = lanczos_select_ritz_indices(eigenvalues, which);
+    for (int j = 0; j < out.lam.size(); ++j) {
+      out.Csel.col(j) = eigenvectors.col(static_cast<int>(indices[static_cast<std::size_t>(j)]));
+    }
+  }
+  return out;
+}
+
+LanczosSnapshot block_lanczos_make_snapshot_from_eigenvalues_last_block(
+    const VectorXd& eigenvalues,
+    const MatrixXd& eigenvector_last_block,
+    FASTEIG_INT block_size,
+    FASTEIG_INT nev,
+    const MatrixXd& beta,
+    const std::string& which,
+    const char* solver_name) {
+  const int m = static_cast<int>(eigenvalues.size());
+  if (m <= 0) {
+    throw std::invalid_argument(std::string(solver_name) + ": no block Ritz values.");
+  }
+  if (block_size <= 0) {
+    throw std::invalid_argument(std::string(solver_name) + ": invalid block size.");
+  }
+  if (eigenvector_last_block.rows() != block_size || eigenvector_last_block.cols() != m) {
+    throw std::invalid_argument(std::string(solver_name) + ": last block shape mismatch.");
+  }
+  if (beta.rows() != block_size || beta.cols() != block_size) {
+    throw std::invalid_argument(std::string(solver_name) + ": block beta shape mismatch.");
+  }
+
+  const int nev_i = static_cast<int>(std::min<FASTEIG_INT>(nev, static_cast<FASTEIG_INT>(m)));
+  if (nev_i <= 0) return {};
+
+  const std::vector<size_t> indices = lanczos_select_ritz_indices(eigenvalues, which);
+  VectorXd lam(nev_i);
+  VectorXd rel_res(nev_i);
+
+  for (int j = 0; j < nev_i; ++j) {
+    const int idx = static_cast<int>(indices[static_cast<std::size_t>(j)]);
+    const double lambda = eigenvalues(idx);
+    lam(j) = lambda;
+
+    const VectorXd y_last = eigenvector_last_block.col(idx);
+    const double abs_res = (beta * y_last).norm();
+    rel_res(j) = abs_res / (1.0 + std::abs(lambda));
+  }
+
+  LanczosSnapshot out;
+  out.lam = std::move(lam);
+  out.rel_res = std::move(rel_res);
+  return out;
+}
+
 LanczosSnapshot lanczos_prepare_final_snapshot(const LanczosSnapshot& snapshot,
                                                const std::string& which,
                                                FASTEIG_DOUBLE shift,

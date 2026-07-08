@@ -144,6 +144,19 @@ double CpuMultiVector::orthogonalize_active_columns(FASTEIG_INT active_cols,
   return h(static_cast<int>(active_cols - 1));
 }
 
+MatrixXd CpuMultiVector::multiply_active_columns(FASTEIG_INT active_cols,
+                                                 const Eigen::Ref<const MatrixXd>& coeffs) const {
+  if (active_cols < 0 || active_cols > cols()) {
+    throw std::invalid_argument("CpuMultiVector::multiply_active_columns: invalid active column count.");
+  }
+  if (coeffs.rows() != static_cast<int>(active_cols)) {
+    throw std::invalid_argument("CpuMultiVector::multiply_active_columns: coefficient row mismatch.");
+  }
+  MatrixXd out(rows(), coeffs.cols());
+  out.noalias() = values_.leftCols(static_cast<int>(active_cols)) * coeffs;
+  return out;
+}
+
 }  // namespace core
 }  // namespace fasteig
 

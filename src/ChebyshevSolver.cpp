@@ -1,6 +1,7 @@
 #include "ChebyshevSolver.hpp"
 
 #include "KrylovSubspace.hpp"
+#include "core/Orthogonalization.hpp"
 #include "fasteig_logger.hpp"
 #include "fasteig_problem.hpp"
 
@@ -121,20 +122,16 @@ FASTEIG_INT ChebyshevSolver::solve() {
 
     chebyshev_filter(ops_eff, X, degree, lambda_min, lambda_max);
 
-    const MatrixXd Gmat = X.transpose() * X;
-    Eigen::LLT<MatrixXd> llt(Gmat);
-    if (llt.info() != Eigen::Success) {
+    MatrixXd R(static_cast<int>(nev), static_cast<int>(nev));
+    info = core::cholesky_qr(X, eigvecs_, R);
+    if (info != 0) {
       const std::string failure_message =
           "Decomposition failed. Matrix may not be positive definite.";
       problem_.logger().print_progress_note(failure_message);
       stderr_logger.print_progress_note(failure_message);
-      info = -1;
       break;
     }
 
-    const MatrixXd L = llt.matrixL();
-    eigvecs_ = X * L.transpose().triangularView<Eigen::Upper>().solve(
-                       MatrixXd::Identity(static_cast<int>(nev), static_cast<int>(nev)));
     X = eigvecs_;
     ops_eff.block_matvec(X, eigvecs_);
     basis_vecs = X.transpose() * eigvecs_;
@@ -196,3 +193,4 @@ void ChebyshevSolver::chebyshev_filter(const operations& ops,
 }
 
 }  // namespace fasteig
+

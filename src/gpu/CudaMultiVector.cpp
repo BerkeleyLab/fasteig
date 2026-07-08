@@ -245,6 +245,63 @@ double CudaMultiVector::orthogonalize_active_columns(FASTEIG_INT active_cols,
   return alpha;
 }
 
+MatrixXd CudaMultiVector::multiply_active_columns(FASTEIG_INT active_cols,
+                                                  const Eigen::Ref<const MatrixXd>& coeffs) const {
+  if (active_cols < 0 || active_cols > cols_) {
+    throw std::invalid_argument("CudaMultiVector::multiply_active_columns: invalid active column count.");
+  }
+  if (coeffs.rows() != static_cast<int>(active_cols)) {
+    throw std::invalid_argument("CudaMultiVector::multiply_active_columns: coefficient row mismatch.");
+  }
+
+  const FASTEIG_INT out_cols = static_cast<FASTEIG_INT>(coeffs.cols());
+  MatrixXd out(static_cast<int>(rows_), static_cast<int>(out_cols));
+  out.setZero();
+  if (rows_ == 0 || out_cols == 0 || active_cols == 0) return out;
+
+  struct DeviceBuffer {
+    double* ptr = nullptr;
+    ~DeviceBuffer() {
+      if (ptr) cudaFree(ptr);
+    }
+  };
+
+  auto& context = cuda_executor_from(exec_, "CudaMultiVector::multiply_active_columns").context();
+  DeviceBuffer d_coeffs;
+  DeviceBuffer d_out;
+  const std::size_t coeff_count =
+      static_cast<std::size_t>(active_cols) * static_cast<std::size_t>(out_cols);
+  const std::size_t out_count =
+      static_cast<std::size_t>(rows_) * static_cast<std::size_t>(out_cols);
+
+  FASTEIG_CUDA_CHECK(cudaMalloc(&d_coeffs.ptr, coeff_count * sizeof(double)));
+  FASTEIG_CUDA_CHECK(cudaMalloc(&d_out.ptr, out_count * sizeof(double)));
+  FASTEIG_CUDA_CHECK(cudaMemcpyAsync(d_coeffs.ptr, coeffs.data(), coeff_count * sizeof(double),
+                                     cudaMemcpyHostToDevice, context.stream()));
+
+  const double one = 1.0;
+  const double zero = 0.0;
+  FASTEIG_CUBLAS_CHECK(cublasDgemm(context.cublas_handle(),
+                                   CUBLAS_OP_N,
+                                   CUBLAS_OP_N,
+                                   static_cast<int>(rows_),
+                                   static_cast<int>(out_cols),
+                                   static_cast<int>(active_cols),
+                                   &one,
+                                   d_values_,
+                                   static_cast<int>(rows_),
+                                   d_coeffs.ptr,
+                                   static_cast<int>(active_cols),
+                                   &zero,
+                                   d_out.ptr,
+                                   static_cast<int>(rows_)));
+  FASTEIG_CUDA_CHECK(cudaMemcpyAsync(out.data(), d_out.ptr, out_count * sizeof(double),
+                                     cudaMemcpyDeviceToHost, context.stream()));
+  FASTEIG_CUDA_CHECK(cudaStreamSynchronize(context.stream()));
+
+  return out;
+}
+
 void CudaMultiVector::orthogonalize_active_columns_device_coeffs(FASTEIG_INT active_cols,
                                                                  const Vector& source,
                                                                  Vector& residual,

@@ -37,12 +37,16 @@ FASTEIG_INT LanczosSolver::solve() {
   if (maxiter > n) throw std::invalid_argument("LanczosSolver: maxiter must be <= n.");
   validate_lanczos_which(which, /*allow_sai=*/true, "LanczosSolver");
 
+  // Progress output setup.  A scalar Lanczos "iteration" is one Krylov vector
+  // expansion, and print_every controls how often snapshots are emitted.
   fasteig_logger stdout_logger;
   if (verbosity >= 2) stdout_logger.attach(&std::cout);
   fasteig_logger* log_logger =
       (print_every > 0 && problem_.log_stream()) ? &problem_.logger() : nullptr;
   fasteig_logger* console_logger = (verbosity >= 2) ? &stdout_logger : nullptr;
 
+  // Executor-owned objects.  CPU and CUDA differ only behind the executor,
+  // operator, vectors, multivectors, and workspace implementations.
   std::shared_ptr<core::Executor> exec = problem_.executor(options_);
   std::unique_ptr<core::LinearOperator> op = problem_.make_linear_operator(options_, *exec);
   const unsigned int base_seed = options_.seed().value_or(1u);
@@ -54,6 +58,8 @@ FASTEIG_INT LanczosSolver::solve() {
   auto lanczos_workspace = core::make_lanczos_workspace(*exec, n, maxiter, nev);
   core::KrylovSubspace krylov(*op, *x, *av, *basis, *lanczos_workspace, base_seed);
 
+  // Scalar Krylov recurrence.  After m iterations, the current Ritz space is
+  // span{q_0, ..., q_{m-1}}, and the workspace stores beta_m for residual estimates.
   bool converged = false;
   FASTEIG_INT it_stop = maxiter;
   FASTEIG_INT last_emitted_iter = 0;
@@ -67,6 +73,8 @@ FASTEIG_INT LanczosSolver::solve() {
     const FASTEIG_INT check_every = (print_every > 0) ? print_every : 5;
     const bool do_check = (m >= nev) && ((m % check_every) == 0 || m == maxiter);
 
+    // Snapshot construction diagonalizes the projected tridiagonal matrix held
+    // by the workspace.  For CUDA, that projected eigensolve can stay on device.
     if (!do_progress && !do_check) continue;
 
     LanczosSnapshot snap = lanczos_workspace->compute_snapshot(
@@ -96,6 +104,9 @@ FASTEIG_INT LanczosSolver::solve() {
     }
   }
 
+  // Final Ritz vectors are formed by the workspace so the CPU/CUDA choice stays
+  // hidden from the solver.  CUDA keeps the basis and GEMM on device until the
+  // final eigenvectors are copied back for user-facing results.
   lanczos_workspace->finalize_eigenpairs(*op, *basis, it_stop, final,
                                          which, options_.shift(),
                                          eigvals_, eigvecs_, resnrms_);

@@ -10,12 +10,15 @@ CudaContext::CudaContext() {
   FASTEIG_CUDA_CHECK(cudaStreamCreate(&stream_));
   FASTEIG_CUBLAS_CHECK(cublasCreate(&cublas_handle_));
   FASTEIG_CUBLAS_CHECK(cublasSetStream(cublas_handle_, stream_));
+  FASTEIG_CUSOLVER_CHECK(cusolverDnCreate(&cusolver_handle_));
+  FASTEIG_CUSOLVER_CHECK(cusolverDnSetStream(cusolver_handle_, stream_));
   FASTEIG_CUSPARSE_CHECK(cusparseCreate(&cusparse_handle_));
   FASTEIG_CUSPARSE_CHECK(cusparseSetStream(cusparse_handle_, stream_));
 }
 
 CudaContext::~CudaContext() {
   if (cusparse_handle_) cusparseDestroy(cusparse_handle_);
+  if (cusolver_handle_) cusolverDnDestroy(cusolver_handle_);
   if (cublas_handle_) cublasDestroy(cublas_handle_);
   if (stream_) cudaStreamDestroy(stream_);
 }

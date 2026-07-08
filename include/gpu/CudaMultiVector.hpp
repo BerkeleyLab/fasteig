@@ -36,6 +36,8 @@ public:
                                     const Vector& source,
                                     Vector& residual,
                                     std::vector<double>& coeffs) const override;
+  MatrixXd multiply_active_columns(FASTEIG_INT active_cols,
+                                   const Eigen::Ref<const MatrixXd>& coeffs) const override;
 
   void orthogonalize_active_columns_device_coeffs(FASTEIG_INT active_cols,
                                                   const Vector& source,

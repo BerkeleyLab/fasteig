@@ -45,6 +45,33 @@ LanczosSnapshot lanczos_compute_cpu_snapshot(const MatrixXd& T,
                                              bool need_vectors,
                                              const char* solver_name);
 
+LanczosSnapshot block_lanczos_compute_cpu_snapshot(const MatrixXd& T,
+                                                   FASTEIG_INT block_count,
+                                                   FASTEIG_INT block_size,
+                                                   FASTEIG_INT nev,
+                                                   const MatrixXd& beta,
+                                                   const std::string& which,
+                                                   bool need_vectors,
+                                                   const char* solver_name);
+
+LanczosSnapshot block_lanczos_make_snapshot_from_eigendecomp(const VectorXd& eigenvalues,
+                                                             const MatrixXd& eigenvectors,
+                                                             FASTEIG_INT block_size,
+                                                             FASTEIG_INT nev,
+                                                             const MatrixXd& beta,
+                                                             const std::string& which,
+                                                             bool need_vectors,
+                                                             const char* solver_name);
+
+LanczosSnapshot block_lanczos_make_snapshot_from_eigenvalues_last_block(
+    const VectorXd& eigenvalues,
+    const MatrixXd& eigenvector_last_block,
+    FASTEIG_INT block_size,
+    FASTEIG_INT nev,
+    const MatrixXd& beta,
+    const std::string& which,
+    const char* solver_name);
+
 LanczosSnapshot lanczos_prepare_final_snapshot(const LanczosSnapshot& snapshot,
                                                const std::string& which,
                                                FASTEIG_DOUBLE shift,

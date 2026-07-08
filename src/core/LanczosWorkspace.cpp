@@ -38,12 +38,55 @@ void CpuLanczosWorkspace::record_step(FASTEIG_INT it,
   beta_next_ = beta_next;
 }
 
+void CpuLanczosWorkspace::record_block_step(FASTEIG_INT block_index,
+                                            FASTEIG_INT block_size,
+                                            const MatrixXd& diagonal_block,
+                                            const MatrixXd& beta_block) {
+  if (block_index < 0 || block_size <= 0) {
+    throw std::invalid_argument("CpuLanczosWorkspace::record_block_step: invalid block index/size.");
+  }
+  if (diagonal_block.rows() != block_size || diagonal_block.cols() != block_size ||
+      beta_block.rows() != block_size || beta_block.cols() != block_size) {
+    throw std::invalid_argument("CpuLanczosWorkspace::record_block_step: block shape mismatch.");
+  }
+
+  const FASTEIG_INT row = block_index * block_size;
+  const FASTEIG_INT next_row = row + block_size;
+  if (next_row + block_size > T_.rows() || next_row + block_size > T_.cols()) {
+    throw std::invalid_argument("CpuLanczosWorkspace::record_block_step: projected matrix too small.");
+  }
+
+  T_.block(static_cast<int>(row),
+           static_cast<int>(row),
+           static_cast<int>(block_size),
+           static_cast<int>(block_size)) = diagonal_block;
+  T_.block(static_cast<int>(next_row),
+           static_cast<int>(row),
+           static_cast<int>(block_size),
+           static_cast<int>(block_size)) = beta_block;
+  T_.block(static_cast<int>(row),
+           static_cast<int>(next_row),
+           static_cast<int>(block_size),
+           static_cast<int>(block_size)) = beta_block.transpose();
+  beta_block_ = beta_block;
+}
+
 LanczosSnapshot CpuLanczosWorkspace::compute_snapshot(FASTEIG_INT m,
                                                       FASTEIG_INT nev,
                                                       const std::string& which,
                                                       bool need_vectors,
                                                       const char* solver_name) {
   return lanczos_compute_cpu_snapshot(T_, m, nev, beta_next_, which, need_vectors, solver_name);
+}
+
+LanczosSnapshot CpuLanczosWorkspace::compute_block_snapshot(FASTEIG_INT block_count,
+                                                            FASTEIG_INT block_size,
+                                                            FASTEIG_INT nev,
+                                                            const std::string& which,
+                                                            bool need_vectors,
+                                                            const char* solver_name) {
+  return block_lanczos_compute_cpu_snapshot(T_, block_count, block_size, nev, beta_block_,
+                                            which, need_vectors, solver_name);
 }
 
 void CpuLanczosWorkspace::finalize_eigenpairs(const LinearOperator& op,

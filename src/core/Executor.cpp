@@ -33,6 +33,34 @@ std::unique_ptr<Vector> Executor::create_random_vector(FASTEIG_INT size,
   return create_vector(values);
 }
 
+std::unique_ptr<MultiVector> Executor::create_multivector(
+    const Eigen::Ref<const MatrixXd>& values) const {
+  auto x = create_multivector(static_cast<FASTEIG_INT>(values.rows()),
+                              static_cast<FASTEIG_INT>(values.cols()));
+  x->copy_from_host(values);
+  return x;
+}
+
+std::unique_ptr<MultiVector> Executor::create_random_multivector(
+    FASTEIG_INT rows,
+    FASTEIG_INT cols,
+    std::optional<unsigned int> seed) const {
+  if (rows <= 0 || cols <= 0) {
+    throw std::invalid_argument("Executor::create_random_multivector: dimensions must be positive.");
+  }
+  constexpr unsigned int kDefaultSeed = 1u;
+  std::mt19937 rng(seed.value_or(kDefaultSeed));
+  std::uniform_real_distribution<double> dist(-1.0, 1.0);
+
+  MatrixXd values(static_cast<int>(rows), static_cast<int>(cols));
+  for (int j = 0; j < values.cols(); ++j) {
+    for (int i = 0; i < values.rows(); ++i) {
+      values(i, j) = dist(rng);
+    }
+  }
+  return create_multivector(values);
+}
+
 std::unique_ptr<Vector> CpuExecutor::create_vector(FASTEIG_INT size) const {
   return std::make_unique<CpuVector>(*this, size);
 }

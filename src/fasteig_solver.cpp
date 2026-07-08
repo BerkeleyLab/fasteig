@@ -113,22 +113,6 @@ VectorXd fasteig_solver::compute_residual_norms(const operations& opsA,
   return residuals;
 }
 
-FASTEIG_INT fasteig_solver::CholeskyQR(MatrixXd& X, MatrixXd& Q, MatrixXd& R) {
-  const int ncols = X.cols();
-
-  Eigen::MatrixXd Gmat = X.transpose() * X;
-  Eigen::LLT<Eigen::MatrixXd> llt(Gmat);
-  if (llt.info() != Eigen::Success) {
-    std::cerr << "CholeskyQR: Gram matrix is not positive definite." << std::endl;
-    return -1;
-  }
-
-  const Eigen::MatrixXd L = llt.matrixL();
-  R = L.transpose();
-  Q = X * R.triangularView<Eigen::Upper>().solve(Eigen::MatrixXd::Identity(ncols, ncols));
-  return 0;
-}
-
 std::unique_ptr<fasteig_solver> make_fasteig_solver(const std::string& solver,
                                                     ::fasteig_problem& problem,
                                                     const fasteig_options& options) {

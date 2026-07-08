@@ -57,9 +57,12 @@ int main(int argc, const char* argv[])
   const bool gpu_exec = (exe_l.find("gpu") != std::string::npos);
 #endif
   const std::string solver_l = lower_copy(opts.solver());
-  if (gpu_exec && (solver_l == "lanczos" || solver_l == "gpulanczos")) {
+  if (gpu_exec && (solver_l == "lanczos" || solver_l == "gpulanczos" ||
+                   solver_l == "blocklanczos" || solver_l == "gpublocklanczos")) {
     if (solver_l == "gpulanczos") {
       opts.set("solver", "Lanczos");
+    } else if (solver_l == "gpublocklanczos") {
+      opts.set("solver", "BlockLanczos");
     }
     opts.set_gpu_backend(true);
   }

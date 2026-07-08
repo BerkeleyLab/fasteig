@@ -1,5 +1,6 @@
 #include "DavidsonSolver.hpp"
 
+#include "core/Orthogonalization.hpp"
 #include "fasteig_logger.hpp"
 #include "fasteig_problem.hpp"
 
@@ -71,7 +72,7 @@ FASTEIG_INT DavidsonSolver::solve() {
 
   // Orthonormalize the initial basis vectors before Rayleigh-Ritz.
   RES = eigvecs_;
-  info = CholeskyQR(RES, eigvecs_, R);
+  info = core::cholesky_qr(RES, eigvecs_, R);
   if (info != 0) {
     stdout_logger.print_progress_note(
         "Cholesky factorization failed, info = " + std::to_string(info));
@@ -111,7 +112,7 @@ FASTEIG_INT DavidsonSolver::solve() {
       RES = RES - Q.leftCols(jblk * ncols) * Temp;
 
       // Orthonormalize within the block.
-      info = CholeskyQR(RES, eigvecs_, R);
+      info = core::cholesky_qr(RES, eigvecs_, R);
       if (info != 0) {
         stdout_logger.print_progress_note(
             "Cholesky factorization failed, info = " + std::to_string(info));

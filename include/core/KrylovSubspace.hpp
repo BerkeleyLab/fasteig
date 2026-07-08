@@ -56,24 +56,22 @@ private:
 class BlockKrylovSubspace {
 public:
   BlockKrylovSubspace(const LinearOperator& op,
-                      const MatrixXd& initial_block,
+                      const MultiVector& initial_block,
                       MultiVector& basis,
-                      MatrixXd& projected_matrix,
-                      MatrixXd& beta);
+                      LanczosWorkspace& projection);
 
   void build(FASTEIG_INT begin, FASTEIG_INT end);
-  const MatrixXd& host_basis() const noexcept { return host_basis_; }
+  MatrixXd ritz_vectors(FASTEIG_INT active_cols,
+                        const Eigen::Ref<const MatrixXd>& coefficients) const;
 
 private:
-  void apply_block(FASTEIG_INT first_col, FASTEIG_INT block_size, MatrixXd& output) const;
-  void copy_host_block_to_basis(FASTEIG_INT first_col, const MatrixXd& block);
+  void copy_block_to_basis(FASTEIG_INT first_col, const MultiVector& block);
+  void initialize_basis_block(FASTEIG_INT n, FASTEIG_INT b);
 
   const LinearOperator& op_;
-  const MatrixXd& initial_block_;
+  const MultiVector& initial_block_;
   MultiVector& basis_;
-  MatrixXd& projected_matrix_;
-  MatrixXd& beta_;
-  MatrixXd host_basis_;
+  LanczosWorkspace& projection_;
   bool initialized_ = false;
 };
 

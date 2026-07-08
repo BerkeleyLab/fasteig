@@ -33,6 +33,12 @@ public:
       std::optional<unsigned int> seed = std::nullopt) const;
   virtual std::unique_ptr<MultiVector> create_multivector(FASTEIG_INT rows,
                                                           FASTEIG_INT cols) const = 0;
+  virtual std::unique_ptr<MultiVector> create_multivector(
+      const Eigen::Ref<const MatrixXd>& values) const;
+  virtual std::unique_ptr<MultiVector> create_random_multivector(
+      FASTEIG_INT rows,
+      FASTEIG_INT cols,
+      std::optional<unsigned int> seed = std::nullopt) const;
   virtual std::unique_ptr<CsrMatrix> create_csr_matrix(const CsrMatrixData& data) const = 0;
   virtual void synchronize() const = 0;
 
@@ -43,6 +49,7 @@ public:
 class CpuExecutor final : public Executor {
 public:
   using Executor::create_vector;
+  using Executor::create_multivector;
 
   ExecutorKind kind() const noexcept override { return ExecutorKind::Cpu; }
   const char* name() const noexcept override { return "CPU"; }

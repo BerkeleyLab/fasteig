@@ -1,30 +1,20 @@
 #include "BlockLanczosSolver.hpp"
 
+#include "LanczosCommon.hpp"
 #include "core/Executor.hpp"
 #include "core/KrylovSubspace.hpp"
+#include "core/LanczosWorkspace.hpp"
 #include "core/LinearOperator.hpp"
 #include "core/MultiVector.hpp"
 #include "fasteig_problem.hpp"
 #include "fasteig_logger.hpp"
 
-#include <algorithm>
-#include <cctype>
-#include <cmath>
+#include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
 namespace fasteig {
-namespace {
-
-std::string lower_copy(std::string s) {
-  std::transform(s.begin(), s.end(), s.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return s;
-}
-
-}  // namespace
 
 BlockLanczosSolver::BlockLanczosSolver(::fasteig_problem& problem,
                                        const fasteig_options& options)
@@ -51,145 +41,85 @@ FASTEIG_INT BlockLanczosSolver::solve() {
     throw std::invalid_argument("BlockLanczosSolver: need maxiter*blksize >= nev.");
   }
 
-  const std::string sigma = lower_copy(which);
-  if (sigma != "sr" && sigma != "lr" && sigma != "sm" && sigma != "lm" && sigma != "be") {
-    throw std::invalid_argument("BlockLanczosSolver: invalid which option (use SR/LR/SM/LM/BE).");
-  }
+  const std::string sigma = lanczos_lower_copy(which);
+  validate_lanczos_which(sigma, /*allow_sai=*/false, "BlockLanczosSolver");
 
-  // print_every is intentionally ignored for BlockLanczos:
-  // if verbosity==2, emit a snapshot every block iteration (one block matvec).
-  std::ostream* log = problem_.log_stream();
+  // Progress output mirrors LanczosSolver's logger setup.  For Block Lanczos,
+  // one "iteration" means one block expansion, so enabled progress is emitted
+  // after each block rather than after print_every scalar matvecs.
   fasteig_logger stdout_logger;
   if (verbosity >= 2) stdout_logger.attach(&std::cout);
+  fasteig_logger* log_logger = problem_.log_stream() ? &problem_.logger() : nullptr;
+  fasteig_logger* console_logger = (verbosity >= 2) ? &stdout_logger : nullptr;
 
-  // Basis blocks Q_0..Q_maxiter (Q_maxiter exists to form beta for the last snapshot).
-  // Use the driver's initial block when provided (options_.v0 is initialized by the driver)
-  // so all solvers can start from the same vectors.
-  // Fall back to random vectors only if v0 is missing or too narrow.
-  MatrixXd V0;
-  if (options_.v0().size() > 0) {
-    const int c = std::min<int>(options_.v0().cols(), b);
-    V0.resize(n, b);
-    V0.leftCols(c) = options_.v0().leftCols(c);
-    if (c < b) {
-      V0.rightCols(b - c).setRandom();
-    }
-  } else {
-    V0 = MatrixXd::Random(n, b);
-  }
-  MatrixXd T((max_blocks + 1) * b, (max_blocks + 1) * b);
-  T.setZero();
-
-  MatrixXd beta(b, b);
+  // Executor-owned objects.  CPU and CUDA differ only behind the executor,
+  // operator, multivectors, and workspace implementations.
   std::shared_ptr<core::Executor> exec = problem_.executor(options_);
   std::unique_ptr<core::LinearOperator> op = problem_.make_linear_operator(options_, *exec);
-  auto basis = exec->create_multivector(n, static_cast<FASTEIG_INT>((max_blocks + 1) * b));
+  const FASTEIG_INT projection_dim = static_cast<FASTEIG_INT>((max_blocks + 1) * b);
+  const unsigned int base_seed = options_.seed().value_or(1u);
+  if (options_.v0().size() > 0 &&
+      (options_.v0().rows() != n || options_.v0().cols() < b)) {
+    throw std::invalid_argument("BlockLanczosSolver: v0 must have shape n x at least blksize.");
+  }
+  auto initial_block = (options_.v0().size() > 0)
+                           ? exec->create_multivector(options_.v0().leftCols(b))
+                           : exec->create_random_multivector(n, blksize, base_seed);
+  auto basis = exec->create_multivector(n, projection_dim);
+  auto lanczos_workspace = core::make_lanczos_workspace(*exec, n, projection_dim, nev);
 
-  struct Snapshot {
-    VectorXd lam;      // Ritz values (nev_i)
-    VectorXd rel_res;  // relative residual estimates (nev_i)
-    MatrixXd Csel;     // selected eigenvectors of T_m (m_dim x nev_i)
-  };
-
-  auto compute_snapshot = [&](int iter_blocks, const MatrixXd& beta_iter, bool need_vectors) -> Snapshot {
-    const int m_dim = iter_blocks * b;
-    const int nev_i = std::min(static_cast<int>(nev), m_dim);
-    if (nev_i <= 0) return {};
-
-    Eigen::SelfAdjointEigenSolver<MatrixXd> solver(T.topLeftCorner(m_dim, m_dim));
-    const auto D = solver.eigenvalues();
-    const auto C = solver.eigenvectors();
-
-    std::vector<size_t> Ind(static_cast<size_t>(m_dim), 0);
-    if (sigma == "be") {
-      int pos = 0;
-      for (int i = 0; i < m_dim / 2; ++i) {
-        Ind[static_cast<size_t>(pos++)] = static_cast<size_t>(m_dim - 1 - i);
-        Ind[static_cast<size_t>(pos++)] = static_cast<size_t>(i);
-      }
-      if (m_dim % 2 == 1) {
-        Ind[static_cast<size_t>(pos)] = static_cast<size_t>(m_dim / 2);
-      }
-    } else {
-      Ind = sort_indices(D, sigma);
-    }
-
-    VectorXd lam(nev_i);
-    VectorXd rel_res(nev_i);
-    MatrixXd Csel;
-    if (need_vectors) Csel.resize(m_dim, nev_i);
-    for (int j = 0; j < nev_i; ++j) {
-      const int idx = static_cast<int>(Ind[static_cast<size_t>(j)]);
-      const double lambda = D(idx);
-      lam(j) = lambda;
-
-      const VectorXd y_last = C.block(m_dim - b, idx, b, 1);
-      const double abs_res = (beta_iter * y_last).norm();
-      rel_res(j) = abs_res / (1.0 + std::abs(lambda));
-
-      if (need_vectors) Csel.col(j) = C.col(idx);
-    }
-
-    Snapshot out;
-    out.lam = std::move(lam);
-    out.rel_res = std::move(rel_res);
-    out.Csel = std::move(Csel);
-    return out;
-  };
-
-  auto emit_snapshot = [&](int iter_blocks, const Snapshot& snap) {
-    if (snap.lam.size() == 0) return;
-
-    if (log) {
-      problem_.logger().print_convergence_data(snap.lam, snap.rel_res, iter_blocks);
-    }
-    if (verbosity >= 2) {
-      stdout_logger.print_convergence_data(snap.lam, snap.rel_res, iter_blocks);
-    }
-  };
-
-  // Build the block Krylov basis one block at a time using KrylovSubspace.
-  // After iter blocks, the current Ritz space is span{Q_0, ..., Q_{iter-1}} (dimension iter*b),
-  // and beta corresponds to the coupling to Q_iter for the residual estimate.
+  // Block Krylov recurrence.  After iter block expansions, the current Ritz
+  // space is span{Q_0, ..., Q_{iter-1}} with dimension iter*blksize, and the
+  // workspace stores the coupling to Q_iter for the residual estimate.
   bool converged = false;
   int it_stop = max_blocks;
   int last_emitted_iter = 0;
-  Snapshot final;
-  core::BlockKrylovSubspace krylov(*op, V0, *basis, T, beta);
+  LanczosSnapshot final;
+  core::BlockKrylovSubspace krylov(*op, *initial_block, *basis, *lanczos_workspace);
   for (int iter = 1; iter <= max_blocks; ++iter) {
     krylov.build(static_cast<FASTEIG_INT>(iter - 1), static_cast<FASTEIG_INT>(iter));
 
     // Always compute/check convergence once the subspace is large enough to represent nev.
     const bool do_check = (iter * b >= static_cast<int>(nev));
-    const bool do_progress = (verbosity >= 2) || (log != nullptr);
+    const bool do_progress = (log_logger != nullptr) || (console_logger != nullptr);
     if (!do_check && !do_progress) continue;
 
-    Snapshot snap = compute_snapshot(iter, beta, /*need_vectors=*/false);
+    LanczosSnapshot snap = lanczos_workspace->compute_block_snapshot(
+        static_cast<FASTEIG_INT>(iter), blksize, nev, sigma,
+        /*need_vectors=*/false, "BlockLanczosSolver");
     if (do_progress) {
-      emit_snapshot(iter, snap);
+      lanczos_emit_snapshot(snap, iter, log_logger, console_logger);
       last_emitted_iter = iter;
     }
 
     if (do_check && snap.rel_res.size() > 0 && snap.rel_res.maxCoeff() < tol) {
       converged = true;
       it_stop = iter;
-      final = compute_snapshot(iter, beta, /*need_vectors=*/true);
+      final = lanczos_workspace->compute_block_snapshot(
+          static_cast<FASTEIG_INT>(iter), blksize, nev, sigma,
+          /*need_vectors=*/true, "BlockLanczosSolver");
       break;
     }
   }
 
   if (!converged) {
-    final = compute_snapshot(max_blocks, beta, /*need_vectors=*/true);
+    final = lanczos_workspace->compute_block_snapshot(
+        static_cast<FASTEIG_INT>(max_blocks), blksize, nev, sigma,
+        /*need_vectors=*/true, "BlockLanczosSolver");
     // Ensure we have a final progress record even if verbosity==1.
-    if (((log != nullptr) || verbosity >= 2) && last_emitted_iter != max_blocks) {
-      emit_snapshot(max_blocks, final);
+    if ((log_logger != nullptr || console_logger != nullptr) && last_emitted_iter != max_blocks) {
+      lanczos_emit_snapshot(final, max_blocks, log_logger, console_logger);
     }
   }
 
+  // Final Ritz vectors are formed by the workspace so the CPU/CUDA choice stays
+  // hidden from the solver.  CUDA keeps the basis and GEMM on device until the
+  // final eigenvectors are copied back for user-facing results.
   const int m_dim = it_stop * b;
-  eigvals_ = final.lam;
-  eigvecs_.noalias() = krylov.host_basis().leftCols(m_dim) * final.Csel;
-  compute_final_residual_norms();
+  lanczos_workspace->finalize_eigenpairs(*op, *basis, static_cast<FASTEIG_INT>(m_dim),
+                                         final, sigma, options_.shift(),
+                                         eigvals_, eigvecs_, resnrms_);
+
   set_iterations(static_cast<long long>(it_stop));
   return status_;
 }

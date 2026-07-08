@@ -117,7 +117,6 @@ protected:
   const operations& active_ops() const noexcept;
   void compute_final_residual_norms();
   void set_iterations(long long it) noexcept { iterations_ = it; }
-  static FASTEIG_INT CholeskyQR(MatrixXd& X, MatrixXd& Q, MatrixXd& R);
 
   ::fasteig_problem& problem_;
   const operations& opsA_;

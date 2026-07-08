@@ -34,6 +34,8 @@ public:
                                             const Vector& source,
                                             Vector& residual,
                                             std::vector<double>& coeffs) const = 0;
+  virtual MatrixXd multiply_active_columns(FASTEIG_INT active_cols,
+                                           const Eigen::Ref<const MatrixXd>& coeffs) const = 0;
 };
 
 class CpuMultiVector final : public MultiVector {
@@ -65,6 +67,8 @@ public:
                                     const Vector& source,
                                     Vector& residual,
                                     std::vector<double>& coeffs) const override;
+  MatrixXd multiply_active_columns(FASTEIG_INT active_cols,
+                                   const Eigen::Ref<const MatrixXd>& coeffs) const override;
 
   MatrixXd& values() noexcept { return values_; }
   const MatrixXd& values() const noexcept { return values_; }

@@ -18,6 +18,30 @@
 
 namespace fasteig {
 namespace core {
+namespace {
+
+void copy_host_block_to_device(double* d_matrix,
+                               FASTEIG_INT ld,
+                               FASTEIG_INT row,
+                               FASTEIG_INT col,
+                               const MatrixXd& block,
+                               cudaStream_t stream) {
+  if (row < 0 || col < 0 || row + block.rows() > ld || col + block.cols() > ld) {
+    throw std::invalid_argument("CudaLanczosWorkspace: device block copy out of range.");
+  }
+  FASTEIG_CUDA_CHECK(cudaMemcpy2DAsync(
+      d_matrix + static_cast<std::size_t>(row) +
+          static_cast<std::size_t>(col) * static_cast<std::size_t>(ld),
+      static_cast<std::size_t>(ld) * sizeof(double),
+      block.data(),
+      static_cast<std::size_t>(block.rows()) * sizeof(double),
+      static_cast<std::size_t>(block.rows()) * sizeof(double),
+      static_cast<std::size_t>(block.cols()),
+      cudaMemcpyHostToDevice,
+      stream));
+}
+
+}  // namespace
 
 CudaLanczosWorkspace::CudaLanczosWorkspace(const Executor& exec,
                                            FASTEIG_INT n,
@@ -79,6 +103,32 @@ void CudaLanczosWorkspace::record_step(FASTEIG_INT it,
   beta_next_ = beta_next;
 }
 
+void CudaLanczosWorkspace::record_block_step(FASTEIG_INT block_index,
+                                             FASTEIG_INT block_size,
+                                             const MatrixXd& diagonal_block,
+                                             const MatrixXd& beta_block) {
+  if (block_index < 0 || block_size <= 0) {
+    throw std::invalid_argument("CudaLanczosWorkspace::record_block_step: invalid block index/size.");
+  }
+  if (diagonal_block.rows() != block_size || diagonal_block.cols() != block_size ||
+      beta_block.rows() != block_size || beta_block.cols() != block_size) {
+    throw std::invalid_argument("CudaLanczosWorkspace::record_block_step: block shape mismatch.");
+  }
+
+  const FASTEIG_INT row = block_index * block_size;
+  const FASTEIG_INT next_row = row + block_size;
+  if (next_row + block_size > maxiter_) {
+    throw std::invalid_argument("CudaLanczosWorkspace::record_block_step: projected matrix too small.");
+  }
+
+  auto& context = cuda_executor_from(exec_, "CudaLanczosWorkspace::record_block_step").context();
+  copy_host_block_to_device(d_T_, maxiter_, row, row, diagonal_block, context.stream());
+  copy_host_block_to_device(d_T_, maxiter_, next_row, row, beta_block, context.stream());
+  MatrixXd beta_t = beta_block.transpose();
+  copy_host_block_to_device(d_T_, maxiter_, row, next_row, beta_t, context.stream());
+  beta_block_ = beta_block;
+}
+
 LanczosSnapshot CudaLanczosWorkspace::compute_snapshot(FASTEIG_INT m,
                                                        FASTEIG_INT nev,
                                                        const std::string& which,
@@ -138,6 +188,82 @@ LanczosSnapshot CudaLanczosWorkspace::compute_snapshot(FASTEIG_INT m,
     return lanczos_make_snapshot_from_eigenvalues_last_row(D, last_row, nev, beta_next_, which);
   }
   return lanczos_make_snapshot_from_eigendecomp(D, C, nev, beta_next_, which, need_vectors);
+}
+
+LanczosSnapshot CudaLanczosWorkspace::compute_block_snapshot(FASTEIG_INT block_count,
+                                                             FASTEIG_INT block_size,
+                                                             FASTEIG_INT nev,
+                                                             const std::string& which,
+                                                             bool need_vectors,
+                                                             const char* solver_name) {
+  if (block_count <= 0 || block_size <= 0) {
+    throw std::invalid_argument("CudaLanczosWorkspace::compute_block_snapshot: invalid block count/size.");
+  }
+  if (beta_block_.rows() != block_size || beta_block_.cols() != block_size) {
+    throw std::invalid_argument("CudaLanczosWorkspace::compute_block_snapshot: beta block is not initialized.");
+  }
+
+  const FASTEIG_INT m = block_count * block_size;
+  if (m <= 0 || m > maxiter_) {
+    throw std::invalid_argument("CudaLanczosWorkspace::compute_block_snapshot: invalid snapshot size.");
+  }
+
+  auto& context = cuda_executor_from(exec_, "CudaLanczosWorkspace::compute_block_snapshot").context();
+  const int m_i = static_cast<int>(m);
+  const int b_i = static_cast<int>(block_size);
+
+  FASTEIG_CUDA_CHECK(cudaMemcpy2DAsync(
+      d_snapshot_T_, static_cast<std::size_t>(m_i) * sizeof(double),
+      d_T_, static_cast<std::size_t>(maxiter_) * sizeof(double),
+      static_cast<std::size_t>(m_i) * sizeof(double),
+      static_cast<std::size_t>(m_i),
+      cudaMemcpyDeviceToDevice,
+      context.stream()));
+
+  FASTEIG_CUSOLVER_CHECK(cusolverDnDsyevd(
+      cusolver_handle_, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
+      m_i, d_snapshot_T_, m_i, d_W_, d_work_, lwork_, d_dev_info_));
+
+  int dev_info = 0;
+  VectorXd D(m_i);
+  FASTEIG_CUDA_CHECK(cudaMemcpyAsync(&dev_info, d_dev_info_, sizeof(int),
+                                     cudaMemcpyDeviceToHost, context.stream()));
+  FASTEIG_CUDA_CHECK(cudaMemcpyAsync(D.data(), d_W_,
+                                     static_cast<std::size_t>(m_i) * sizeof(double),
+                                     cudaMemcpyDeviceToHost, context.stream()));
+
+  MatrixXd C;
+  MatrixXd last_block;
+  if (need_vectors) {
+    C.resize(m_i, m_i);
+    FASTEIG_CUDA_CHECK(cudaMemcpyAsync(C.data(), d_snapshot_T_,
+                                       static_cast<std::size_t>(m_i) *
+                                           static_cast<std::size_t>(m_i) * sizeof(double),
+                                       cudaMemcpyDeviceToHost, context.stream()));
+  } else {
+    last_block.resize(b_i, m_i);
+    FASTEIG_CUDA_CHECK(cudaMemcpy2DAsync(
+        last_block.data(),
+        static_cast<std::size_t>(b_i) * sizeof(double),
+        d_snapshot_T_ + static_cast<std::size_t>(m_i - b_i),
+        static_cast<std::size_t>(m_i) * sizeof(double),
+        static_cast<std::size_t>(b_i) * sizeof(double),
+        static_cast<std::size_t>(m_i),
+        cudaMemcpyDeviceToHost,
+        context.stream()));
+  }
+  FASTEIG_CUDA_CHECK(cudaStreamSynchronize(context.stream()));
+
+  if (dev_info != 0) {
+    throw std::runtime_error("CudaLanczosWorkspace::compute_block_snapshot: cuSOLVER syevd failed.");
+  }
+
+  if (need_vectors) {
+    return block_lanczos_make_snapshot_from_eigendecomp(
+        D, C, block_size, nev, beta_block_, which, need_vectors, solver_name);
+  }
+  return block_lanczos_make_snapshot_from_eigenvalues_last_block(
+      D, last_block, block_size, nev, beta_block_, which, solver_name);
 }
 
 void CudaLanczosWorkspace::finalize_eigenpairs(const LinearOperator& op,

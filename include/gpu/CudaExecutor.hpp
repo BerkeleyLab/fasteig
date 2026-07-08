@@ -14,6 +14,7 @@ namespace core {
 class CudaExecutor final : public Executor {
 public:
   using Executor::create_vector;
+  using Executor::create_multivector;
 
   explicit CudaExecutor(int device_id = 0);
 
