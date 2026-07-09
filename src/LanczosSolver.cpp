@@ -56,7 +56,7 @@ FASTEIG_INT LanczosSolver::solve() {
   auto av = exec->create_vector(n);
   auto basis = exec->create_multivector(n, maxiter);
   auto lanczos_workspace = core::make_lanczos_workspace(*exec, n, maxiter, nev);
-  core::KrylovSubspace krylov(*op, *x, *av, *basis, *lanczos_workspace, base_seed);
+  core::KrylovSubspace subspace(*op, *x, *av, *basis, base_seed);
 
   // Scalar Krylov recurrence.  After m iterations, the current Ritz space is
   // span{q_0, ..., q_{m-1}}, and the workspace stores beta_m for residual estimates.
@@ -66,7 +66,18 @@ FASTEIG_INT LanczosSolver::solve() {
   LanczosSnapshot final;
 
   for (FASTEIG_INT it = 0; it < maxiter; ++it) {
-    krylov.build(it, it + 1);
+    // 1. Normalize the current residual into the next basis vector q_it.
+    const double beta = subspace.normalize_residual_into_basis(it);
+
+    // 2. Apply the selected linear operator: z = op * q_it.
+    subspace.apply_operator_to_basis_column(it);
+
+    // 3. Orthogonalize z against the active basis and keep the new residual.
+    const double alpha = subspace.orthogonalize_operator_result(it + 1);
+    const double beta_next = subspace.residual_norm();
+
+    // 4. Record the projected tridiagonal coefficients.
+    lanczos_workspace->record_step(it, beta, alpha, beta_next);
 
     const FASTEIG_INT m = it + 1;
     const bool do_progress = (print_every > 0) && ((m % print_every) == 0);

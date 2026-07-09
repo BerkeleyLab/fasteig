@@ -1,6 +1,9 @@
 #include "DavidsonSolver.hpp"
 
+#include "core/Executor.hpp"
+#include "core/LinearOperator.hpp"
 #include "core/Orthogonalization.hpp"
+#include "core/Operations.hpp"
 #include "fasteig_logger.hpp"
 #include "fasteig_problem.hpp"
 
@@ -24,23 +27,9 @@ FASTEIG_INT DavidsonSolver::solve() {
   const std::string which_l = lower_copy(options_.which());
   const bool flip_sign = (which_l == "lr" || which_l == "lm");
 
-  operations ops_eff = active_ops();
-  if (flip_sign) {
-    const auto orig_mv = ops_eff.matvec;
-    const auto orig_bmv = ops_eff.block_matvec;
-    if (orig_mv) {
-      ops_eff.matvec = [orig_mv](const VectorXd& v, VectorXd& av) {
-        orig_mv(v, av);
-        av *= -1.0;
-      };
-    }
-    if (orig_bmv) {
-      ops_eff.block_matvec = [orig_bmv](const MatrixXd& V, MatrixXd& AV) {
-        orig_bmv(V, AV);
-        AV *= -1.0;
-      };
-    }
-  }
+  std::shared_ptr<core::Executor> exec = problem_.executor(options_);
+  std::unique_ptr<core::LinearOperator> op = problem_.make_linear_operator(options_, *exec);
+  core::ScaledLinearOperator effective_op(*op, flip_sign ? -1.0 : 1.0);
 
   const FASTEIG_INT nev = options_.nev();
   const FASTEIG_INT maxiter = options_.maxiter();
@@ -80,7 +69,7 @@ FASTEIG_INT DavidsonSolver::solve() {
   }
 
   // RES keeps the residual of the initial Rayleigh-Ritz approximation.
-  RayleighRitz(ops_eff, eigvecs_, Ritzvals, Ritzvecs, G, RES);
+  RayleighRitz(effective_op, eigvecs_, Ritzvals, Ritzvecs, G, RES);
 
   const FASTEIG_DOUBLE tol = options_.tol();
   size_t it_done = 0;
@@ -121,7 +110,7 @@ FASTEIG_INT DavidsonSolver::solve() {
 
       Q.block(row0, col0, nrows, ncols) = eigvecs_;
 
-      ops_eff.block_matvec(eigvecs_, AV);
+      AV = core::apply_to_host(effective_op, eigvecs_);
       AQ.block(row0, col0, nrows, ncols) = AV;
 
       // Append the new projection blocks into T.

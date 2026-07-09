@@ -1,7 +1,13 @@
 #include "ChebyshevSolver.hpp"
 
-#include "KrylovSubspace.hpp"
+#include "LanczosCommon.hpp"
+#include "core/Executor.hpp"
+#include "core/KrylovSubspace.hpp"
+#include "core/LinearOperator.hpp"
 #include "core/Orthogonalization.hpp"
+#include "core/Operations.hpp"
+#include "core/MultiVector.hpp"
+#include "core/Vector.hpp"
 #include "fasteig_logger.hpp"
 #include "fasteig_problem.hpp"
 
@@ -10,9 +16,51 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <memory>
 #include <sstream>
 
 namespace fasteig {
+namespace {
+
+MatrixXd apply_effective_to_host(const core::LinearOperator& op,
+                                 const Eigen::Ref<const MatrixXd>& X) {
+  return core::apply_to_host(op, X);
+}
+
+void estimate_bounds_with_executor(const core::LinearOperator& op,
+                                   FASTEIG_INT n,
+                                   unsigned int seed,
+                                   double& evlb,
+                                   double& evub) {
+  constexpr FASTEIG_INT k_requested = 20;
+  const FASTEIG_INT k = std::min(k_requested, n);
+  if (k <= 0) throw std::invalid_argument("ChebyshevSolver: invalid dimension for bound estimate.");
+
+  auto residual = op.executor().create_random_vector(n, seed);
+  auto operator_result = op.executor().create_vector(n);
+  auto basis = op.executor().create_multivector(n, k);
+  MatrixXd H(static_cast<int>(k), static_cast<int>(k));
+  H.setZero();
+
+  core::KrylovSubspace subspace(op, *residual, *operator_result, *basis, H, seed);
+  subspace.build(0, k);
+
+  const double beta = core::norm2(*residual);
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(H.block(0, 0, static_cast<int>(k), static_cast<int>(k)));
+  const VectorXd eigenvalues = solver.eigenvalues();
+  const MatrixXd eigenvectors = solver.eigenvectors();
+
+  evlb = std::numeric_limits<double>::infinity();
+  evub = -std::numeric_limits<double>::infinity();
+  for (FASTEIG_INT j = 0; j < k; ++j) {
+    const double t = std::fabs(beta * eigenvectors(static_cast<int>(k - 1), static_cast<int>(j)));
+    evlb = std::min(evlb, eigenvalues(static_cast<int>(j)) - t);
+    evub = std::max(evub, eigenvalues(static_cast<int>(j)) + t);
+  }
+}
+
+}  // namespace
 
 ChebyshevSolver::ChebyshevSolver(::fasteig_problem& problem,
                                  const fasteig_options& options)
@@ -48,23 +96,9 @@ FASTEIG_INT ChebyshevSolver::solve() {
   const std::string which_l = lower_copy(options_.which());
   const bool flip_sign = (which_l == "lr" || which_l == "lm");
 
-  operations ops_eff = active_ops();
-  if (flip_sign) {
-    const auto orig_mv = ops_eff.matvec;
-    const auto orig_bmv = ops_eff.block_matvec;
-    if (orig_mv) {
-      ops_eff.matvec = [orig_mv](const VectorXd& v, VectorXd& av) {
-        orig_mv(v, av);
-        av *= -1.0;
-      };
-    }
-    if (orig_bmv) {
-      ops_eff.block_matvec = [orig_bmv](const MatrixXd& V, MatrixXd& AV) {
-        orig_bmv(V, AV);
-        AV *= -1.0;
-      };
-    }
-  }
+  std::shared_ptr<core::Executor> exec = problem_.executor(options_);
+  std::unique_ptr<core::LinearOperator> op = problem_.make_linear_operator(options_, *exec);
+  core::ScaledLinearOperator effective_op(*op, flip_sign ? -1.0 : 1.0);
 
   const FASTEIG_INT n = eigvecs_.rows();
   const FASTEIG_INT nev = options_.nev();
@@ -99,7 +133,7 @@ FASTEIG_INT ChebyshevSolver::solve() {
   if (verbose) {
     stdout_logger.print_progress_note(filtering_message);
   }
-  KrylovSubspace::getevbounds(n, ops_eff, lambda_min, lambda_max);
+  estimate_bounds_with_executor(effective_op, n, options_.seed().value_or(1u), lambda_min, lambda_max);
   problem_.logger().print_progress_note("Spectral bounds from Lanczos:");
   if (verbose) {
     stdout_logger.print_progress_note("Spectral bounds from Lanczos:");
@@ -120,7 +154,7 @@ FASTEIG_INT ChebyshevSolver::solve() {
       stdout_logger.print_progress_note(iteration_message);
     }
 
-    chebyshev_filter(ops_eff, X, degree, lambda_min, lambda_max);
+    chebyshev_filter(effective_op, X, degree, lambda_min, lambda_max, flip_sign);
 
     MatrixXd R(static_cast<int>(nev), static_cast<int>(nev));
     info = core::cholesky_qr(X, eigvecs_, R);
@@ -133,7 +167,7 @@ FASTEIG_INT ChebyshevSolver::solve() {
     }
 
     X = eigvecs_;
-    ops_eff.block_matvec(X, eigvecs_);
+    eigvecs_ = apply_effective_to_host(effective_op, X);
     basis_vecs = X.transpose() * eigvecs_;
     eigvecs_ = eigvecs_ - X * basis_vecs;
     subspace_resnrm = eigvecs_.norm();
@@ -148,7 +182,7 @@ FASTEIG_INT ChebyshevSolver::solve() {
   }
 
   if (info == 0) {
-    RayleighRitz(ops_eff, X, eigvals_, eigvecs_, basis_vecs, residuals);
+    RayleighRitz(effective_op, X, eigvals_, eigvecs_, basis_vecs, residuals);
   }
 
   if (flip_sign) {
@@ -162,16 +196,17 @@ FASTEIG_INT ChebyshevSolver::solve() {
   return status_;
 }
 
-void ChebyshevSolver::chebyshev_filter(const operations& ops,
+void ChebyshevSolver::chebyshev_filter(const core::LinearOperator& op,
                                        MatrixXd& V,
                                        FASTEIG_INT degree,
                                        FASTEIG_DOUBLE lambda_min,
-                                       FASTEIG_DOUBLE lambda_max) {
+                                       FASTEIG_DOUBLE lambda_max,
+                                       bool flip_sign) {
   MatrixXd V_old = V;
   MatrixXd V_new = V;
   MatrixXd AV = V;
 
-  ops.block_matvec(V, V_new);
+  V_new = apply_effective_to_host(op, V);
 
   const FASTEIG_DOUBLE rat = 1.0e3; // ratio of Cheby(xlb) and Cheby(lb), hard-coded for now.
   const FASTEIG_DOUBLE xlb = std::cosh(std::acosh(rat) / degree);
@@ -184,12 +219,13 @@ void ChebyshevSolver::chebyshev_filter(const operations& ops,
 
   V_new = c * V_new + d * V;
   for (FASTEIG_INT k = 2; k <= degree; ++k) {
-    ops.block_matvec(V_new, AV);
+    AV = apply_effective_to_host(op, V_new);
     MatrixXd V_tmp = 2.0 * (c * AV + d * V_new) - V_old;
     V_old = V_new;
     V_new = V_tmp;
   }
   V = V_new;
+  (void)flip_sign;
 }
 
 }  // namespace fasteig

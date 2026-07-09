@@ -30,6 +30,31 @@ KrylovSubspace::KrylovSubspace(const LinearOperator& op,
                                Vector& residual,
                                Vector& operator_result,
                                MultiVector& basis,
+                               unsigned int restart_seed)
+    : op_(op),
+      residual_(residual),
+      operator_result_(operator_result),
+      basis_(basis),
+      lanczos_projection_(nullptr),
+      projected_matrix_(nullptr),
+      restart_seed_(restart_seed) {
+  if (&op_.executor() != &residual_.executor() ||
+      &op_.executor() != &operator_result_.executor() ||
+      &op_.executor() != &basis_.executor()) {
+    throw std::invalid_argument("core::KrylovSubspace: executor mismatch.");
+  }
+  if (op_.rows() != operator_result_.size() || op_.cols() != residual_.size()) {
+    throw std::invalid_argument("core::KrylovSubspace: operator/vector dimension mismatch.");
+  }
+  if (basis_.rows() != residual_.size()) {
+    throw std::invalid_argument("core::KrylovSubspace: basis row count mismatch.");
+  }
+}
+
+KrylovSubspace::KrylovSubspace(const LinearOperator& op,
+                               Vector& residual,
+                               Vector& operator_result,
+                               MultiVector& basis,
                                LanczosWorkspace& projection,
                                unsigned int restart_seed)
     : op_(op),
@@ -95,24 +120,41 @@ void KrylovSubspace::build(FASTEIG_INT begin, FASTEIG_INT end) {
 }
 
 void KrylovSubspace::build_one(FASTEIG_INT it, FASTEIG_INT begin, FASTEIG_INT end) {
-  const double beta = normalize_or_restart(it);
+  const double beta = normalize_residual_into_basis(it);
+  apply_operator_to_basis_column(it);
+  const double alpha = orthogonalize_operator_result(it + 1);
+  const double beta_next = residual_norm();
+  record_step(it, begin, end, beta, alpha, beta_next);
+}
 
+double KrylovSubspace::normalize_residual_into_basis(FASTEIG_INT basis_col) {
+  if (basis_col < 0 || basis_col >= basis_.cols()) {
+    throw std::invalid_argument("core::KrylovSubspace::normalize_residual_into_basis: column out of range.");
+  }
+  const double beta = normalize_or_restart(basis_col);
   scal(1.0 / beta, residual_);
-  copy_column_from(basis_, it, residual_);
-  apply_column(op_, basis_, it, operator_result_);
+  copy_column_from(basis_, basis_col, residual_);
+  return beta;
+}
 
-  const double alpha = orthogonalize_active_columns(it + 1);
+void KrylovSubspace::apply_operator_to_basis_column(FASTEIG_INT basis_col) {
+  if (basis_col < 0 || basis_col >= basis_.cols()) {
+    throw std::invalid_argument("core::KrylovSubspace::apply_operator_to_basis_column: column out of range.");
+  }
+  apply_column(op_, basis_, basis_col, operator_result_);
+}
+
+double KrylovSubspace::orthogonalize_operator_result(FASTEIG_INT active_cols) {
+  return fasteig::core::orthogonalize_active_columns(
+      basis_, active_cols, operator_result_, residual_);
+}
+
+double KrylovSubspace::residual_norm() const {
   const double beta_next = norm2(residual_);
   if (!std::isfinite(beta_next)) {
     throw std::runtime_error("core::KrylovSubspace: non-finite next residual norm encountered.");
   }
-
-  record_step(it, begin, end, beta, alpha, beta_next);
-}
-
-double KrylovSubspace::orthogonalize_active_columns(FASTEIG_INT active_cols) {
-  return fasteig::core::orthogonalize_active_columns(
-      basis_, active_cols, operator_result_, residual_);
+  return beta_next;
 }
 
 void KrylovSubspace::record_step(FASTEIG_INT it,
@@ -177,12 +219,10 @@ void KrylovSubspace::restart_residual(FASTEIG_INT it) {
 
 BlockKrylovSubspace::BlockKrylovSubspace(const LinearOperator& op,
                                          const MultiVector& initial_block,
-                                         MultiVector& basis,
-                                         LanczosWorkspace& projection)
+                                         MultiVector& basis)
     : op_(op),
       initial_block_(initial_block),
-      basis_(basis),
-      projection_(projection) {
+      basis_(basis) {
   if (&op_.executor() != &basis_.executor() ||
       &op_.executor() != &initial_block_.executor()) {
     throw std::invalid_argument("core::BlockKrylovSubspace: executor mismatch.");
@@ -193,6 +233,16 @@ BlockKrylovSubspace::BlockKrylovSubspace(const LinearOperator& op,
   if (initial_block.cols() <= 0) {
     throw std::invalid_argument("core::BlockKrylovSubspace: block size must be positive.");
   }
+  operator_block_ = op_.executor().create_multivector(op_.rows(), initial_block_.cols());
+  residual_block_ = op_.executor().create_multivector(op_.rows(), initial_block_.cols());
+}
+
+BlockKrylovSubspace::BlockKrylovSubspace(const LinearOperator& op,
+                                         const MultiVector& initial_block,
+                                         MultiVector& basis,
+                                         LanczosWorkspace& projection)
+    : BlockKrylovSubspace(op, initial_block, basis) {
+  projection_ = &projection;
 }
 
 void BlockKrylovSubspace::build(FASTEIG_INT begin, FASTEIG_INT end) {
@@ -200,7 +250,6 @@ void BlockKrylovSubspace::build(FASTEIG_INT begin, FASTEIG_INT end) {
     throw std::invalid_argument("core::BlockKrylovSubspace::build: invalid range.");
   }
 
-  const FASTEIG_INT n = basis_.rows();
   const FASTEIG_INT b = initial_block_.cols();
   const FASTEIG_INT required_cols = (end + 1) * b;
   if (required_cols > basis_.cols()) {
@@ -208,52 +257,76 @@ void BlockKrylovSubspace::build(FASTEIG_INT begin, FASTEIG_INT end) {
   }
 
   if (begin == 0) {
-    initialize_basis_block(n, b);
+    initialize_basis_block();
   }
 
   for (FASTEIG_INT i = begin + 1; i <= end; ++i) {
-    auto block_result = op_.executor().create_multivector(op_.rows(), b);
-    auto residual = op_.executor().create_multivector(op_.rows(), b);
-
-    fasteig::core::apply_block(op_, basis_, (i - 1) * b, b, *block_result);
-
-    const FASTEIG_INT active_cols = i * b;
-    MatrixXd H;
-    MatrixXd beta;
-    FASTEIG_INT info = block_gram_schmidt(basis_, active_cols, *block_result,
-                                          *residual, H);
-    if (info != 0) {
-      throw std::runtime_error("core::BlockKrylovSubspace::build: block Gram-Schmidt failed.");
+    apply_operator_to_basis_block(i - 1);
+    orthogonalize_operator_block(i * b);
+    qr_residual_block(i);
+    if (!projection_) {
+      throw std::logic_error("core::BlockKrylovSubspace::build: no projection target configured.");
     }
-
-    info = thin_qr_in_place(*residual, beta, QrMethod::Cholesky2);
-    if (info != 0) {
-      throw std::runtime_error("core::BlockKrylovSubspace::build: block QR failed.");
-    }
-
-    copy_block_to_basis(i * b, *residual);
-
-    const MatrixXd diagonal_block = H.bottomRows(static_cast<int>(b));
-    projection_.record_block_step(i - 1, b, diagonal_block, beta);
+    projection_->record_block_step(i - 1, b, diagonal_block_, coupling_block_);
   }
 }
 
-void BlockKrylovSubspace::initialize_basis_block(FASTEIG_INT n, FASTEIG_INT b) {
+void BlockKrylovSubspace::initialize_basis_block() {
   if (initialized_) return;
 
+  const FASTEIG_INT n = basis_.rows();
+  const FASTEIG_INT b = initial_block_.cols();
   if (initial_block_.cols() != b || initial_block_.rows() != n) {
     throw std::invalid_argument("core::BlockKrylovSubspace::initialize_basis_block: initial block mismatch.");
   }
 
-  auto initial_q = op_.executor().create_multivector(n, b);
-  initial_q->copy_from(initial_block_);
+  residual_block_->copy_from(initial_block_);
   MatrixXd R;
-  const FASTEIG_INT info = thin_qr_in_place(*initial_q, R, QrMethod::Cholesky2);
+  const FASTEIG_INT info = thin_qr_in_place(*residual_block_, R, QrMethod::Cholesky2);
   if (info != 0) {
     throw std::runtime_error("core::BlockKrylovSubspace::initialize_basis_block: initial QR failed.");
   }
-  copy_block_to_basis(0, *initial_q);
+  copy_block_to_basis(0, *residual_block_);
   initialized_ = true;
+}
+
+void BlockKrylovSubspace::apply_operator_to_basis_block(FASTEIG_INT block_index) {
+  const FASTEIG_INT b = initial_block_.cols();
+  if (!initialized_) {
+    throw std::logic_error("core::BlockKrylovSubspace::apply_operator_to_basis_block: basis not initialized.");
+  }
+  if (block_index < 0 || (block_index + 1) * b > basis_.cols()) {
+    throw std::invalid_argument("core::BlockKrylovSubspace::apply_operator_to_basis_block: block out of range.");
+  }
+  fasteig::core::apply_block(op_, basis_, block_index * b, b, *operator_block_);
+}
+
+void BlockKrylovSubspace::orthogonalize_operator_block(FASTEIG_INT active_cols) {
+  const FASTEIG_INT b = initial_block_.cols();
+  if (active_cols <= 0 || active_cols > basis_.cols() || active_cols % b != 0) {
+    throw std::invalid_argument("core::BlockKrylovSubspace::orthogonalize_operator_block: invalid active column count.");
+  }
+
+  MatrixXd H;
+  const FASTEIG_INT info = block_gram_schmidt(basis_, active_cols, *operator_block_,
+                                              *residual_block_, H);
+  if (info != 0) {
+    throw std::runtime_error("core::BlockKrylovSubspace::orthogonalize_operator_block: block Gram-Schmidt failed.");
+  }
+  diagonal_block_ = H.bottomRows(static_cast<int>(b));
+}
+
+void BlockKrylovSubspace::qr_residual_block(FASTEIG_INT next_block_index) {
+  const FASTEIG_INT b = initial_block_.cols();
+  if (next_block_index < 0 || (next_block_index + 1) * b > basis_.cols()) {
+    throw std::invalid_argument("core::BlockKrylovSubspace::qr_residual_block: block out of range.");
+  }
+
+  FASTEIG_INT info = thin_qr_in_place(*residual_block_, coupling_block_, QrMethod::Cholesky2);
+  if (info != 0) {
+    throw std::runtime_error("core::BlockKrylovSubspace::qr_residual_block: block QR failed.");
+  }
+  copy_block_to_basis(next_block_index * b, *residual_block_);
 }
 
 MatrixXd BlockKrylovSubspace::ritz_vectors(

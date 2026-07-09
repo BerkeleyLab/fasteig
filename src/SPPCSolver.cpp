@@ -1,6 +1,10 @@
 #include "SPPCSolver.hpp"
 
+#include "core/Executor.hpp"
+#include "core/LinearOperator.hpp"
 #include "fasteig_problem.hpp"
+
+#include <memory>
 
 namespace fasteig {
 
@@ -9,7 +13,12 @@ SPPCSolver::SPPCSolver(::fasteig_problem& problem,
     : fasteig_solver(problem, options) {}
 
 FASTEIG_INT SPPCSolver::solve() {
-  const operations& ops = active_ops();
+  const operations& legacy_ops = active_ops();
+  std::shared_ptr<core::Executor> exec = problem_.executor(options_);
+  std::unique_ptr<core::LinearOperator> op = problem_.make_linear_operator(options_, *exec);
+  operations ops = make_host_operations_adapter(*op);
+  ops.H0 = legacy_ops.H0;
+  ops.V21 = legacy_ops.V21;
   const int n = static_cast<int>(eigvecs_.rows());
   const int ns = static_cast<int>(ops.H0.rows());
   const FASTEIG_INT nev = options_.nev();
@@ -58,3 +67,4 @@ FASTEIG_INT SPPCSolver::solve() {
 }
 
 }  // namespace fasteig
+

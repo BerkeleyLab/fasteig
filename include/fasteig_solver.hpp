@@ -50,6 +50,10 @@ class fasteig_problem;
 
 namespace fasteig {
 
+namespace core {
+class LinearOperator;
+}  // namespace core
+
 // Utility: sort Ritz value indices for solver selection rules.
 template <typename T>
 std::vector<size_t> sort_indices(const T& v, std::string which) {
@@ -94,7 +98,22 @@ public:
                            MatrixXd &eigenvectors,
                            MatrixXd &residuals);
 
+  static void RayleighRitz(const core::LinearOperator& op,
+                           MatrixXd &V,
+                           VectorXd &Ritzvals,
+                           MatrixXd &Ritzvecs,
+                           MatrixXd &eigenvectors,
+                           MatrixXd &residuals);
+
   static void RayleighRitz(const operations& ops,
+                           const Eigen::Ref<const MatrixXd>& V,
+                           FASTEIG_SIZET nev,
+                           std::string which,
+                           VectorXd& Ritzvals,
+                           MatrixXd& Ritzvecs,
+                           MatrixXd& residuals);
+
+  static void RayleighRitz(const core::LinearOperator& op,
                            const Eigen::Ref<const MatrixXd>& V,
                            FASTEIG_SIZET nev,
                            std::string which,
@@ -117,6 +136,7 @@ protected:
   const operations& active_ops() const noexcept;
   void compute_final_residual_norms();
   void set_iterations(long long it) noexcept { iterations_ = it; }
+  static operations make_host_operations_adapter(const core::LinearOperator& op);
 
   ::fasteig_problem& problem_;
   const operations& opsA_;
@@ -146,3 +166,4 @@ std::unique_ptr<fasteig_solver> make_fasteig_solver(const std::string& solver,
                                                     const fasteig_options& options);
 
 }  // namespace fasteig
+

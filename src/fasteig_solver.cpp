@@ -12,6 +12,7 @@
 #include "RMMDIISSolver.hpp"
 #include "SPPCSolver.hpp"
 
+#include "core/Operations.hpp"
 #include "fasteig_problem.hpp"
 
 namespace fasteig {
@@ -63,6 +64,20 @@ const operations& fasteig_solver::active_ops() const noexcept {
 
 void fasteig_solver::compute_final_residual_norms() {
   resnrms_ = compute_residual_norms(opsA_, eigvals_, eigvecs_);
+}
+
+operations fasteig_solver::make_host_operations_adapter(const core::LinearOperator& op) {
+  operations ops;
+  ops.matvec = [&op](const VectorXd& v, VectorXd& av) {
+    MatrixXd V(v.rows(), 1);
+    V.col(0) = v;
+    MatrixXd AV = core::apply_to_host(op, V);
+    av = AV.col(0);
+  };
+  ops.block_matvec = [&op](const MatrixXd& V, MatrixXd& AV) {
+    AV = core::apply_to_host(op, V);
+  };
+  return ops;
 }
 
 VectorXd fasteig_solver::compute_residual_norms(const operations& ops,
@@ -180,6 +195,28 @@ void fasteig_solver::RayleighRitz(const operations &ops,
   }
 }
 
+void fasteig_solver::RayleighRitz(const core::LinearOperator& op,
+                                  MatrixXd &V,
+                                  VectorXd &Ritzvals,
+                                  MatrixXd &Ritzvecs,
+                                  MatrixXd &eigenvectors,
+                                  MatrixXd &residuals) {
+  MatrixXd AV = core::apply_to_host(op, V);
+  Eigen::MatrixXd Gmat = V.transpose() * AV;
+  Gmat = (Gmat.transpose() + Gmat) / 2.0;
+
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(Gmat);
+  eigenvectors = solver.eigenvectors();
+
+  Ritzvecs = V * eigenvectors;
+  Ritzvals = solver.eigenvalues();
+
+  residuals = AV * eigenvectors;
+  for (int j = 0; j < residuals.cols(); ++j) {
+    residuals.col(j).noalias() -= Ritzvecs.col(j) * Ritzvals[j];
+  }
+}
+
 void fasteig_solver::RayleighRitz(const operations& ops,
                                   const Eigen::Ref<const MatrixXd>& V,
                                   FASTEIG_SIZET nev,
@@ -236,4 +273,58 @@ void fasteig_solver::RayleighRitz(const operations& ops,
   (void)n;
 }
 
+void fasteig_solver::RayleighRitz(const core::LinearOperator& op,
+                                  const Eigen::Ref<const MatrixXd>& V,
+                                  FASTEIG_SIZET nev,
+                                  std::string which,
+                                  VectorXd& Ritzvals,
+                                  MatrixXd& Ritzvecs,
+                                  MatrixXd& residuals) {
+  if (nev == 0) throw std::invalid_argument("RayleighRitz: nev must be > 0.");
+  if (V.cols() == 0) throw std::invalid_argument("RayleighRitz: V must have at least 1 column.");
+
+  const int m = V.cols();
+  const int nev_i = static_cast<int>(std::min<FASTEIG_SIZET>(nev, static_cast<FASTEIG_SIZET>(m)));
+
+  MatrixXd AV = core::apply_to_host(op, V);
+  Eigen::MatrixXd Gmat = V.transpose() * AV;
+  Gmat = (Gmat.transpose() + Gmat) / 2.0;
+
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(Gmat);
+  const auto D = solver.eigenvalues();
+  const auto C = solver.eigenvectors();
+
+  std::vector<size_t> Ind(m, 0);
+  const std::string sigma = lower_copy(std::move(which));
+  if (sigma == "be") {
+    int pos = 0;
+    for (int i = 0; i < m / 2; ++i) {
+      Ind[static_cast<size_t>(pos++)] = static_cast<size_t>(m - 1 - i);
+      Ind[static_cast<size_t>(pos++)] = static_cast<size_t>(i);
+    }
+    if (m % 2 == 1) {
+      Ind[static_cast<size_t>(pos)] = static_cast<size_t>(m / 2);
+    }
+  } else {
+    Ind = sort_indices(D, sigma);
+  }
+
+  MatrixXd Csel(m, nev_i);
+  for (int j = 0; j < nev_i; ++j) {
+    Csel.col(j) = C.col(static_cast<int>(Ind[static_cast<size_t>(j)]));
+  }
+
+  Ritzvals.resize(nev_i);
+  for (int j = 0; j < nev_i; ++j) {
+    Ritzvals(j) = D(static_cast<int>(Ind[static_cast<size_t>(j)]));
+  }
+
+  Ritzvecs.noalias() = V * Csel;
+  residuals.noalias() = AV * Csel;
+  for (int j = 0; j < nev_i; ++j) {
+    residuals.col(j).noalias() -= Ritzvecs.col(j) * Ritzvals(j);
+  }
+}
+
 }  // namespace fasteig
+

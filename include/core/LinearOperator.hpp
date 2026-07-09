@@ -36,6 +36,44 @@ public:
                            double beta = 0.0) const = 0;
 };
 
+class ScaledLinearOperator final : public LinearOperator {
+public:
+  ScaledLinearOperator(const LinearOperator& op, double scale)
+      : op_(op), scale_(scale) {}
+
+  const Executor& executor() const noexcept override { return op_.executor(); }
+  FASTEIG_INT rows() const noexcept override { return op_.rows(); }
+  FASTEIG_INT cols() const noexcept override { return op_.cols(); }
+
+  void apply(const Vector& x,
+             Vector& y,
+             double alpha = 1.0,
+             double beta = 0.0) const override {
+    op_.apply(x, y, scale_ * alpha, beta);
+  }
+
+  void apply_column(const MultiVector& X,
+                    FASTEIG_INT col,
+                    Vector& y,
+                    double alpha = 1.0,
+                    double beta = 0.0) const override {
+    op_.apply_column(X, col, y, scale_ * alpha, beta);
+  }
+
+  void apply_block(const MultiVector& X,
+                   FASTEIG_INT first_col,
+                   FASTEIG_INT block_size,
+                   MultiVector& Y,
+                   double alpha = 1.0,
+                   double beta = 0.0) const override {
+    op_.apply_block(X, first_col, block_size, Y, scale_ * alpha, beta);
+  }
+
+private:
+  const LinearOperator& op_;
+  double scale_ = 1.0;
+};
+
 }  // namespace core
 }  // namespace fasteig
 

@@ -75,9 +75,25 @@ FASTEIG_INT BlockLanczosSolver::solve() {
   int it_stop = max_blocks;
   int last_emitted_iter = 0;
   LanczosSnapshot final;
-  core::BlockKrylovSubspace krylov(*op, *initial_block, *basis, *lanczos_workspace);
+  core::BlockKrylovSubspace subspace(*op, *initial_block, *basis);
+  subspace.initialize_basis_block();
+
   for (int iter = 1; iter <= max_blocks; ++iter) {
-    krylov.build(static_cast<FASTEIG_INT>(iter - 1), static_cast<FASTEIG_INT>(iter));
+    // 1. Apply the selected linear operator to the previous block:
+    //    Z = op * Q_{iter-1}.
+    subspace.apply_operator_to_basis_block(static_cast<FASTEIG_INT>(iter - 1));
+
+    // 2. Orthogonalize Z against all active basis blocks Q_0 ... Q_{iter-1}.
+    subspace.orthogonalize_operator_block(static_cast<FASTEIG_INT>(iter * b));
+
+    // 3. QR-factor the residual block.  The Q factor becomes Q_iter and the
+    //    R factor is the block coupling used in the projected matrix.
+    subspace.qr_residual_block(static_cast<FASTEIG_INT>(iter));
+
+    // 4. Record the block projected matrix coefficients.
+    lanczos_workspace->record_block_step(static_cast<FASTEIG_INT>(iter - 1), blksize,
+                                         subspace.diagonal_block(),
+                                         subspace.coupling_block());
 
     // Always compute/check convergence once the subspace is large enough to represent nev.
     const bool do_check = (iter * b >= static_cast<int>(nev));

@@ -72,6 +72,11 @@ void apply_block(const LinearOperator& op,
                  double alpha = 1.0,
                  double beta = 0.0);
 
+MatrixXd apply_to_host(const LinearOperator& op,
+                       const Eigen::Ref<const MatrixXd>& X,
+                       double alpha = 1.0,
+                       double beta = 0.0);
+
 }  // namespace core
 }  // namespace fasteig
 

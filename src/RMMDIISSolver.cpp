@@ -1,6 +1,10 @@
 #include "RMMDIISSolver.hpp"
 
+#include "core/Executor.hpp"
+#include "core/LinearOperator.hpp"
 #include "fasteig_problem.hpp"
+
+#include <memory>
 
 namespace fasteig {
 
@@ -9,7 +13,9 @@ RMMDIISSolver::RMMDIISSolver(::fasteig_problem& problem,
     : fasteig_solver(problem, options) {}
 
 FASTEIG_INT RMMDIISSolver::solve() {
-  const operations& ops = active_ops();
+  std::shared_ptr<core::Executor> exec = problem_.executor(options_);
+  std::unique_ptr<core::LinearOperator> op = problem_.make_linear_operator(options_, *exec);
+  operations ops = make_host_operations_adapter(*op);
   const FASTEIG_INT n = eigvecs_.rows();
   const FASTEIG_INT nev = options_.nev();
   const FASTEIG_INT maxiter = options_.maxiter();
@@ -42,3 +48,4 @@ FASTEIG_INT RMMDIISSolver::solve() {
 }
 
 }  // namespace fasteig
+

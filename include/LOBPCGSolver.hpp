@@ -1,6 +1,9 @@
 #pragma once
 
+#include "core/LinearOperator.hpp"
 #include "fasteig_solver.hpp"
+
+#include <memory>
 
 class fasteig_problem;
 
@@ -21,6 +24,7 @@ private:
   void initialize_XP_subspaces();
   void lock_eigenvectors();
   bool modified_rayleigh_ritz();
+  MatrixXd apply_operator(const Eigen::Ref<const MatrixXd>& X) const;
   void ortho(MatrixXd& U,
              const MatrixXd& V,
              double tol,
@@ -30,7 +34,8 @@ private:
   void svqb(MatrixXd& U, double tau, char method);
 
   int iter = -1;                 // Iteration counter
-  operations ops_;               // Active operator (may be transformed for which=LR/LM)
+  std::unique_ptr<core::LinearOperator> op_;
+  std::unique_ptr<core::ScaledLinearOperator> effective_op_;
   double conv_tol = 1e-14;       // Convergence tolerance
   double orth_tol = 1e-14;       // Orthogonalization tolerance
   int verbose = 1;               // Verbosity level
@@ -71,3 +76,4 @@ private:
 };
 
 }  // namespace fasteig
+

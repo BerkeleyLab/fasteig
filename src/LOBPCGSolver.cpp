@@ -1,5 +1,7 @@
 #include "LOBPCGSolver.hpp"
 
+#include "core/Executor.hpp"
+#include "core/Operations.hpp"
 #include "fasteig.hpp"
 #include "fasteig_problem.hpp"
 #include "fasteig_logger.hpp"
@@ -64,23 +66,9 @@ FASTEIG_INT LOBPCGSolver::solve() {
   const std::string which_l = lower_copy(options_.which());
   const bool flip_sign = (which_l == "lr" || which_l == "lm");
 
-  ops_ = active_ops();
-  if (flip_sign) {
-    const auto orig_mv = ops_.matvec;
-    const auto orig_bmv = ops_.block_matvec;
-    if (orig_mv) {
-      ops_.matvec = [orig_mv](const VectorXd& v, VectorXd& av) {
-        orig_mv(v, av);
-        av *= -1.0;
-      };
-    }
-    if (orig_bmv) {
-      ops_.block_matvec = [orig_bmv](const MatrixXd& V, MatrixXd& AV) {
-        orig_bmv(V, AV);
-        AV *= -1.0;
-      };
-    }
-  }
+  std::shared_ptr<core::Executor> exec = problem_.executor(options_);
+  op_ = problem_.make_linear_operator(options_, *exec);
+  effective_op_ = std::make_unique<core::ScaledLinearOperator>(*op_, flip_sign ? -1.0 : 1.0);
 
   const FASTEIG_INT nev = options_.nev();
   const FASTEIG_INT maxiter = options_.maxiter();
@@ -142,7 +130,7 @@ FASTEIG_INT LOBPCGSolver::solve() {
       if (use_orth)       ortho(W, XP, orth_tol);
 
       // Update matrix-vector product A*W
-      ops_.block_matvec(W, AW);
+      AW = apply_operator(W);
 
       /*
       -----------------------------------------------------------------
@@ -162,7 +150,7 @@ FASTEIG_INT LOBPCGSolver::solve() {
           if (verbose >= 2) stdout_logger.print_progress_note(orth_message, k+1);
           ortho(W, XP, orth_tol);
           // Recompute AW
-          ops_.block_matvec(W, AW);
+          AW = apply_operator(W);
           // Re-run RR step
           this->modified_rayleigh_ritz();
           // Set use_orth = true so we orthogonalize W against [X P]
@@ -248,7 +236,7 @@ void LOBPCGSolver::initialize_XP_subspaces() {
     //          block_matvec() expected MatrixXd variables as arguments.
     //          Nothing is stored in AW currently, and it will be overwritten
     //          before we need to use it again.
-    ops_.block_matvec(X, AW);
+    AW = apply_operator(X);
     AX.noalias() = AW;
 
     // Initial orthogonalization via RR step
@@ -285,9 +273,16 @@ void LOBPCGSolver::initialize_XP_subspaces() {
     }
     // Initial AP
     auto P = XP.rightCols(b);
-    ops_.block_matvec( P, AW );
+    AW = apply_operator(P);
     AXP.rightCols(b).noalias() = AW;
 
+}
+
+MatrixXd LOBPCGSolver::apply_operator(const Eigen::Ref<const MatrixXd>& X) const {
+    if (!effective_op_) {
+        throw std::logic_error("LOBPCGSolver::apply_operator: operator is not initialized.");
+    }
+    return core::apply_to_host(*effective_op_, X);
 }
 
 /*

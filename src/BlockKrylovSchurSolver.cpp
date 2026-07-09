@@ -1,12 +1,15 @@
 #include "BlockKrylovSchurSolver.hpp"
 
 #include "KrylovSubspace.hpp"
+#include "core/Executor.hpp"
+#include "core/LinearOperator.hpp"
 #include "fasteig_logger.hpp"
 #include "fasteig_problem.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -43,7 +46,9 @@ BlockKrylovSchurSolver::BlockKrylovSchurSolver(
     : fasteig_solver(problem, options) {}
 
 FASTEIG_INT BlockKrylovSchurSolver::solve() {
-  const operations& ops = active_ops();
+  std::shared_ptr<core::Executor> exec = problem_.executor(options_);
+  std::unique_ptr<core::LinearOperator> op = problem_.make_linear_operator(options_, *exec);
+  operations ops = make_host_operations_adapter(*op);
   const int n = static_cast<int>(eigvecs_.rows());
   const int nev = static_cast<int>(options_.nev());
   const int maxiter = static_cast<int>(options_.maxiter());
@@ -210,3 +215,4 @@ FASTEIG_INT BlockKrylovSchurSolver::solve() {
 }
 
 }  // namespace fasteig
+

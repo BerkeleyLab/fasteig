@@ -146,6 +146,27 @@ void apply_block(const LinearOperator& op,
   op.apply_block(X, first_col, block_size, Y, alpha, beta);
 }
 
+MatrixXd apply_to_host(const LinearOperator& op,
+                       const Eigen::Ref<const MatrixXd>& X,
+                       double alpha,
+                       double beta) {
+  if (X.rows() != op.cols()) {
+    throw std::invalid_argument("core::apply_to_host: input row count does not match operator columns.");
+  }
+  if (X.cols() == 0) {
+    return MatrixXd(static_cast<int>(op.rows()), 0);
+  }
+
+  auto x_exec = op.executor().create_multivector(X);
+  auto y_exec = op.executor().create_multivector(op.rows(), static_cast<FASTEIG_INT>(X.cols()));
+  if (beta != 0.0) {
+    throw std::invalid_argument("core::apply_to_host: beta != 0 requires an existing destination.");
+  }
+  apply_block(op, *x_exec, 0, static_cast<FASTEIG_INT>(X.cols()), *y_exec, alpha, beta);
+  op.executor().synchronize();
+  return y_exec->copy_to_host();
+}
+
 }  // namespace core
 }  // namespace fasteig
 
