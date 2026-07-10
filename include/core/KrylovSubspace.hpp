@@ -75,6 +75,7 @@ public:
 
   void build(FASTEIG_INT begin, FASTEIG_INT end);
   void initialize_basis_block();
+  void set_basis_block(FASTEIG_INT block_index, const MultiVector& block);
   void apply_operator_to_basis_block(FASTEIG_INT block_index);
   void orthogonalize_operator_block(FASTEIG_INT active_cols);
   void qr_residual_block(FASTEIG_INT next_block_index);

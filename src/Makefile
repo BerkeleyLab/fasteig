@@ -11,7 +11,7 @@ BUILD_TAG_FILE = .fasteig_build_tag
 $(BUILD_TAG_FILE): force_build_tag
 	@{ echo "PLAT=$(PLAT)"; echo "CXX=$(CXX)"; echo "CXXFLAGS=$(CXXFLAGS)"; echo "USE_CUDA=$(USE_CUDA)"; echo "CUDA_PATH=$(CUDA_PATH)"; echo "USE_CUDSS=$(USE_CUDSS)"; echo "CUDSS_PATH=$(CUDSS_PATH)"; echo "CUDSS_LIBDIR=$(CUDSS_LIBDIR)"; echo "CUDSS_LIB_NAME=$(CUDSS_LIB_NAME)"; } > $@.tmp
 	@cmp -s $@ $@.tmp 2>/dev/null && rm -f $@.tmp || mv $@.tmp $@
-COMMON_OBJS = core/Executor.o core/Vector.o core/MultiVector.o core/CsrMatrix.o core/Operations.o core/OperationsOperator.o core/LanczosWorkspace.o core/KrylovSubspace.o core/Orthogonalization.o KrylovSubspace.o mmio.o rmmdiis.o SPPC_Ind.o parseinput.o fasteig_solver.o LanczosCommon.o LanczosSolver.o BlockLanczosSolver.o BlockKrylovSchurSolver.o KrylovSchurSolver.o DavidsonSolver.o LOBPCGSolver.o ChebyshevSolver.o SPPCSolver.o RMMDIISSolver.o fasteig_options.o fasteig_problem.o fasteig_logger.o
+COMMON_OBJS = core/Executor.o core/Vector.o core/MultiVector.o core/CsrMatrix.o core/Operations.o core/LegacyOperationsOperator.o core/LanczosWorkspace.o core/KrylovSubspace.o core/Orthogonalization.o core/RitzExtraction.o mmio.o rmmdiis.o SPPC_Ind.o parseinput.o fasteig_solver.o LanczosSolver.o BlockLanczosSolver.o BlockKrylovSchurSolver.o KrylovSchurSolver.o DavidsonSolver.o LOBPCGSolver.o ChebyshevSolver.o SPPCSolver.o RMMDIISSolver.o fasteig_options.o fasteig_problem.o fasteig_logger.o
 CUDA_OBJS =
 ifeq ($(USE_CUDA),1)
 CUDA_OBJS += gpu/CudaExecutor.o gpu/CudaVector.o gpu/CudaMultiVector.o gpu/CudaCsrMatrix.o gpu/CudaContext.o gpu/CudaLanczosWorkspace.o gpu/CudaLanczosKernels.o

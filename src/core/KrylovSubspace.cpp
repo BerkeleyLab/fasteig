@@ -282,12 +282,22 @@ void BlockKrylovSubspace::initialize_basis_block() {
 
   residual_block_->copy_from(initial_block_);
   MatrixXd R;
-  const FASTEIG_INT info = thin_qr_in_place(*residual_block_, R, QrMethod::Cholesky2);
+  const FASTEIG_INT info = thin_qr_in_place(*residual_block_, R, QrMethod::Cholesky);
   if (info != 0) {
     throw std::runtime_error("core::BlockKrylovSubspace::initialize_basis_block: initial QR failed.");
   }
   copy_block_to_basis(0, *residual_block_);
   initialized_ = true;
+}
+
+void BlockKrylovSubspace::set_basis_block(FASTEIG_INT block_index,
+                                          const MultiVector& block) {
+  const FASTEIG_INT b = initial_block_.cols();
+  if (block_index < 0 || block.cols() != b || block.rows() != basis_.rows()) {
+    throw std::invalid_argument("core::BlockKrylovSubspace::set_basis_block: block mismatch.");
+  }
+  copy_block_to_basis(block_index * b, block);
+  if (block_index == 0) initialized_ = true;
 }
 
 void BlockKrylovSubspace::apply_operator_to_basis_block(FASTEIG_INT block_index) {
@@ -322,7 +332,7 @@ void BlockKrylovSubspace::qr_residual_block(FASTEIG_INT next_block_index) {
     throw std::invalid_argument("core::BlockKrylovSubspace::qr_residual_block: block out of range.");
   }
 
-  FASTEIG_INT info = thin_qr_in_place(*residual_block_, coupling_block_, QrMethod::Cholesky2);
+  FASTEIG_INT info = thin_qr_in_place(*residual_block_, coupling_block_, QrMethod::Cholesky);
   if (info != 0) {
     throw std::runtime_error("core::BlockKrylovSubspace::qr_residual_block: block QR failed.");
   }

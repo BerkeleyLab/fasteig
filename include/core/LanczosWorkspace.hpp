@@ -1,6 +1,6 @@
 #pragma once
 
-#include "LanczosCommon.hpp"
+#include "core/RitzExtraction.hpp"
 #include "fasteig.hpp"
 
 #include <memory>

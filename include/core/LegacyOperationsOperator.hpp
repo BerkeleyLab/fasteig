@@ -6,11 +6,11 @@
 namespace fasteig {
 namespace core {
 
-class CpuOperationsOperator final : public LinearOperator {
+class LegacyOperationsOperator final : public LinearOperator {
 public:
-  CpuOperationsOperator(const Executor& exec,
-                        FASTEIG_INT n,
-                        const operations& ops);
+  LegacyOperationsOperator(const Executor& exec,
+                           FASTEIG_INT n,
+                           const operations& ops);
 
   const Executor& executor() const noexcept override { return exec_; }
   FASTEIG_INT rows() const noexcept override { return n_; }

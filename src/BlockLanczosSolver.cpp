@@ -1,6 +1,6 @@
 #include "BlockLanczosSolver.hpp"
 
-#include "LanczosCommon.hpp"
+#include "core/RitzExtraction.hpp"
 #include "core/Executor.hpp"
 #include "core/KrylovSubspace.hpp"
 #include "core/LanczosWorkspace.hpp"
@@ -41,8 +41,8 @@ FASTEIG_INT BlockLanczosSolver::solve() {
     throw std::invalid_argument("BlockLanczosSolver: need maxiter*blksize >= nev.");
   }
 
-  const std::string sigma = lanczos_lower_copy(which);
-  validate_lanczos_which(sigma, /*allow_sai=*/false, "BlockLanczosSolver");
+  const std::string sigma = core::lanczos_lower_copy(which);
+  core::validate_lanczos_which(sigma, /*allow_sai=*/false, "BlockLanczosSolver");
 
   // Progress output mirrors LanczosSolver's logger setup.  For Block Lanczos,
   // one "iteration" means one block expansion, so enabled progress is emitted
@@ -74,7 +74,7 @@ FASTEIG_INT BlockLanczosSolver::solve() {
   bool converged = false;
   int it_stop = max_blocks;
   int last_emitted_iter = 0;
-  LanczosSnapshot final;
+  core::LanczosSnapshot final;
   core::BlockKrylovSubspace subspace(*op, *initial_block, *basis);
   subspace.initialize_basis_block();
 
@@ -100,11 +100,11 @@ FASTEIG_INT BlockLanczosSolver::solve() {
     const bool do_progress = (log_logger != nullptr) || (console_logger != nullptr);
     if (!do_check && !do_progress) continue;
 
-    LanczosSnapshot snap = lanczos_workspace->compute_block_snapshot(
+    core::LanczosSnapshot snap = lanczos_workspace->compute_block_snapshot(
         static_cast<FASTEIG_INT>(iter), blksize, nev, sigma,
         /*need_vectors=*/false, "BlockLanczosSolver");
     if (do_progress) {
-      lanczos_emit_snapshot(snap, iter, log_logger, console_logger);
+      core::lanczos_emit_snapshot(snap, iter, log_logger, console_logger);
       last_emitted_iter = iter;
     }
 
@@ -124,7 +124,7 @@ FASTEIG_INT BlockLanczosSolver::solve() {
         /*need_vectors=*/true, "BlockLanczosSolver");
     // Ensure we have a final progress record even if verbosity==1.
     if ((log_logger != nullptr || console_logger != nullptr) && last_emitted_iter != max_blocks) {
-      lanczos_emit_snapshot(final, max_blocks, log_logger, console_logger);
+      core::lanczos_emit_snapshot(final, max_blocks, log_logger, console_logger);
     }
   }
 

@@ -2,7 +2,7 @@
 
 #ifdef USE_CUDA
 
-#include "LanczosCommon.hpp"
+#include "core/RitzExtraction.hpp"
 #include "core/Executor.hpp"
 #include "core/LanczosWorkspace.hpp"
 #include "fasteig.hpp"

@@ -3,7 +3,7 @@
 #include "core/CsrMatrix.hpp"
 #include "core/Executor.hpp"
 #include "core/LinearOperator.hpp"
-#include "core/OperationsOperator.hpp"
+#include "core/LegacyOperationsOperator.hpp"
 #if defined(USE_CUDA) && defined(USE_CUDSS)
 #include "gpu/CudaShiftInvertOperator.hpp"
 #endif
@@ -373,7 +373,7 @@ std::unique_ptr<fasteig::core::LinearOperator> fasteig_problem::build_linear_ope
   if (!op.matvec) {
     throw std::invalid_argument("fasteig_problem: selected operator has no matvec.");
   }
-  return std::make_unique<fasteig::core::CpuOperationsOperator>(exec, n_, op);
+  return std::make_unique<fasteig::core::LegacyOperationsOperator>(exec, n_, op);
 }
 
 FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {

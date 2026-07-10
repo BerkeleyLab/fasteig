@@ -1,4 +1,4 @@
-#include "core/OperationsOperator.hpp"
+#include "core/LegacyOperationsOperator.hpp"
 
 #include "core/MultiVector.hpp"
 #include "core/Vector.hpp"
@@ -8,29 +8,29 @@
 namespace fasteig {
 namespace core {
 
-CpuOperationsOperator::CpuOperationsOperator(const Executor& exec,
-                                             FASTEIG_INT n,
-                                             const operations& ops)
+LegacyOperationsOperator::LegacyOperationsOperator(const Executor& exec,
+                                                   FASTEIG_INT n,
+                                                   const operations& ops)
     : exec_(exec), n_(n), ops_(ops) {
   if (n <= 0) {
-    throw std::invalid_argument("CpuOperationsOperator: dimension must be positive.");
+    throw std::invalid_argument("LegacyOperationsOperator: dimension must be positive.");
   }
   if (!ops_.matvec) {
-    throw std::invalid_argument("CpuOperationsOperator: ops.matvec is not set.");
+    throw std::invalid_argument("LegacyOperationsOperator: ops.matvec is not set.");
   }
 }
 
-void CpuOperationsOperator::apply(const Vector& x,
-                                  Vector& y,
-                                  double alpha,
-                                  double beta) const {
+void LegacyOperationsOperator::apply(const Vector& x,
+                                     Vector& y,
+                                     double alpha,
+                                     double beta) const {
   if (x.size() != n_ || y.size() != n_) {
-    throw std::invalid_argument("CpuOperationsOperator::apply: dimension mismatch.");
+    throw std::invalid_argument("LegacyOperationsOperator::apply: dimension mismatch.");
   }
   const auto* cpu_x = dynamic_cast<const CpuVector*>(&x);
   auto* cpu_y = dynamic_cast<CpuVector*>(&y);
   if (!cpu_x || !cpu_y) {
-    throw std::invalid_argument("CpuOperationsOperator::apply: x and y must be CpuVector objects.");
+    throw std::invalid_argument("LegacyOperationsOperator::apply: x and y must be CpuVector objects.");
   }
 
   VectorXd tmp(static_cast<int>(n_));
@@ -43,22 +43,22 @@ void CpuOperationsOperator::apply(const Vector& x,
   }
 }
 
-void CpuOperationsOperator::apply_column(const MultiVector& X,
-                                         FASTEIG_INT col,
-                                         Vector& y,
-                                         double alpha,
-                                         double beta) const {
+void LegacyOperationsOperator::apply_column(const MultiVector& X,
+                                            FASTEIG_INT col,
+                                            Vector& y,
+                                            double alpha,
+                                            double beta) const {
   if (col < 0 || col >= X.cols()) {
-    throw std::invalid_argument("CpuOperationsOperator::apply_column: column out of range.");
+    throw std::invalid_argument("LegacyOperationsOperator::apply_column: column out of range.");
   }
   if (X.rows() != n_ || y.size() != n_) {
-    throw std::invalid_argument("CpuOperationsOperator::apply_column: dimension mismatch.");
+    throw std::invalid_argument("LegacyOperationsOperator::apply_column: dimension mismatch.");
   }
   const auto* cpu_X = dynamic_cast<const CpuMultiVector*>(&X);
   auto* cpu_y = dynamic_cast<CpuVector*>(&y);
   if (!cpu_X || !cpu_y) {
     throw std::invalid_argument(
-        "CpuOperationsOperator::apply_column: X and y must be CPU objects.");
+        "LegacyOperationsOperator::apply_column: X and y must be CPU objects.");
   }
 
   VectorXd tmp(static_cast<int>(n_));
@@ -71,23 +71,23 @@ void CpuOperationsOperator::apply_column(const MultiVector& X,
   }
 }
 
-void CpuOperationsOperator::apply_block(const MultiVector& X,
-                                        FASTEIG_INT first_col,
-                                        FASTEIG_INT block_size,
-                                        MultiVector& Y,
-                                        double alpha,
-                                        double beta) const {
+void LegacyOperationsOperator::apply_block(const MultiVector& X,
+                                           FASTEIG_INT first_col,
+                                           FASTEIG_INT block_size,
+                                           MultiVector& Y,
+                                           double alpha,
+                                           double beta) const {
   if (first_col < 0 || block_size <= 0 || first_col + block_size > X.cols()) {
-    throw std::invalid_argument("CpuOperationsOperator::apply_block: invalid column range.");
+    throw std::invalid_argument("LegacyOperationsOperator::apply_block: invalid column range.");
   }
   if (X.rows() != n_ || Y.rows() != n_ || Y.cols() < block_size) {
-    throw std::invalid_argument("CpuOperationsOperator::apply_block: dimension mismatch.");
+    throw std::invalid_argument("LegacyOperationsOperator::apply_block: dimension mismatch.");
   }
   const auto* cpu_X = dynamic_cast<const CpuMultiVector*>(&X);
   auto* cpu_Y = dynamic_cast<CpuMultiVector*>(&Y);
   if (!cpu_X || !cpu_Y) {
     throw std::invalid_argument(
-        "CpuOperationsOperator::apply_block: X and Y must be CPU objects.");
+        "LegacyOperationsOperator::apply_block: X and Y must be CPU objects.");
   }
 
   MatrixXd tmp(static_cast<int>(n_), static_cast<int>(block_size));

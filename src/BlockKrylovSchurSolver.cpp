@@ -1,8 +1,9 @@
 #include "BlockKrylovSchurSolver.hpp"
 
-#include "KrylovSubspace.hpp"
 #include "core/Executor.hpp"
+#include "core/KrylovSubspace.hpp"
 #include "core/LinearOperator.hpp"
+#include "core/MultiVector.hpp"
 #include "fasteig_logger.hpp"
 #include "fasteig_problem.hpp"
 
@@ -38,6 +39,55 @@ std::vector<size_t> selected_indices(const VectorXd& values,
   return indices;
 }
 
+void build_block_krylov_cycle(const core::LinearOperator& op,
+                              const core::Executor& exec,
+                              const MatrixXd& seed_block,
+                              int begin,
+                              int end,
+                              MatrixXd& basis,
+                              MatrixXd& projected,
+                              MatrixXd& beta) {
+  const int n = static_cast<int>(basis.rows());
+  const int b = static_cast<int>(seed_block.cols());
+  if (begin < 0 || end < begin) {
+    throw std::invalid_argument("BlockKrylovSchurSolver: invalid block Krylov range.");
+  }
+  if (seed_block.rows() != n || b <= 0) {
+    throw std::invalid_argument("BlockKrylovSchurSolver: invalid block Krylov seed.");
+  }
+  if ((end + 1) * b > basis.cols()) {
+    throw std::invalid_argument("BlockKrylovSchurSolver: basis is too small for block Krylov cycle.");
+  }
+
+  auto initial_block = exec.create_multivector(seed_block);
+  auto exec_basis = exec.create_multivector(static_cast<FASTEIG_INT>(basis.rows()),
+                                            static_cast<FASTEIG_INT>(basis.cols()));
+  core::BlockKrylovSubspace subspace(op, *initial_block, *exec_basis);
+
+  if (begin == 0) {
+    subspace.initialize_basis_block();
+  } else {
+    for (int block = 0; block <= begin; ++block) {
+      auto seeded_block = exec.create_multivector(
+          basis.block(0, block * b, n, b));
+      subspace.set_basis_block(static_cast<FASTEIG_INT>(block), *seeded_block);
+    }
+  }
+
+  for (int i = begin + 1; i <= end; ++i) {
+    subspace.apply_operator_to_basis_block(static_cast<FASTEIG_INT>(i - 1));
+    subspace.orthogonalize_operator_block(static_cast<FASTEIG_INT>(i * b));
+    subspace.qr_residual_block(static_cast<FASTEIG_INT>(i));
+
+    beta = subspace.coupling_block();
+    projected.block((i - 1) * b, (i - 1) * b, b, b) = subspace.diagonal_block();
+    projected.block(i * b, (i - 1) * b, b, b) = beta;
+    projected.block((i - 1) * b, i * b, b, b) = beta.transpose();
+  }
+
+  basis = exec_basis->copy_to_host();
+}
+
 }  // namespace
 
 BlockKrylovSchurSolver::BlockKrylovSchurSolver(
@@ -48,7 +98,6 @@ BlockKrylovSchurSolver::BlockKrylovSchurSolver(
 FASTEIG_INT BlockKrylovSchurSolver::solve() {
   std::shared_ptr<core::Executor> exec = problem_.executor(options_);
   std::unique_ptr<core::LinearOperator> op = problem_.make_linear_operator(options_, *exec);
-  operations ops = make_host_operations_adapter(*op);
   const int n = static_cast<int>(eigvecs_.rows());
   const int nev = static_cast<int>(options_.nev());
   const int maxiter = static_cast<int>(options_.maxiter());
@@ -63,10 +112,6 @@ FASTEIG_INT BlockKrylovSchurSolver::solve() {
   }
   if (maxiter <= 0) {
     throw std::invalid_argument("BlockKrylovSchurSolver: maxiter must be > 0.");
-  }
-  if (!ops.block_matvec) {
-    throw std::invalid_argument(
-        "BlockKrylovSchurSolver: ops.block_matvec is not set.");
   }
   if (problem_.bmatrix() != nullptr) {
     throw std::invalid_argument(
@@ -105,7 +150,8 @@ FASTEIG_INT BlockKrylovSchurSolver::solve() {
     }
     V0 = options_.v0().leftCols(nev);
   } else {
-    V0.setRandom();
+    const unsigned int base_seed = options_.seed().value_or(1u);
+    V0 = exec->create_random_multivector(n, nev, base_seed)->copy_to_host();
   }
 
   // One extra basis block holds the factor Q_F in F = Q_F*beta.  This is the
@@ -117,8 +163,7 @@ FASTEIG_INT BlockKrylovSchurSolver::solve() {
   projected.setZero();
   beta.setZero();
 
-  KrylovSubspace initial(V0, basis, projected, beta);
-  initial.build_block(ops, 0, static_cast<size_t>(block_count));
+  build_block_krylov_cycle(*op, *exec, V0, 0, block_count, basis, projected, beta);
 
   std::ostream* log = (print_every > 0) ? problem_.log_stream() : nullptr;
   fasteig_logger stdout_logger;
@@ -180,7 +225,8 @@ FASTEIG_INT BlockKrylovSchurSolver::solve() {
 
     // Krylov--Schur restart from bks.m:
     //   V_1 = V*C, V_2 = qr(F), T(1:2p,1:p) = [D; beta*C_last].
-    // KrylovSubspace then performs the expand_bklan portion of the cycle.
+    // The executor-aware block subspace then performs the expand_bklan portion
+    // of the cycle.
     const MatrixXd residual_basis = basis.middleCols(cycle_dim, nev);
     basis.setZero();
     basis.leftCols(nev) = final_vectors;
@@ -191,8 +237,8 @@ FASTEIG_INT BlockKrylovSchurSolver::solve() {
     projected.block(nev, 0, nev, nev) = coupling;
     projected.block(0, nev, nev, nev) = coupling.transpose();
 
-    KrylovSubspace expansion(V0, basis, projected, beta);
-    expansion.build_block(ops, 1, static_cast<size_t>(block_count));
+    build_block_krylov_cycle(*op, *exec, basis.leftCols(nev), 1, block_count,
+                             basis, projected, beta);
   }
 
   eigvals_ = final_values;

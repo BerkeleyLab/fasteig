@@ -1,6 +1,6 @@
 #include "LanczosSolver.hpp"
 
-#include "LanczosCommon.hpp"
+#include "core/RitzExtraction.hpp"
 #include "core/Executor.hpp"
 #include "core/KrylovSubspace.hpp"
 #include "core/LanczosWorkspace.hpp"
@@ -26,7 +26,7 @@ FASTEIG_INT LanczosSolver::solve() {
   const FASTEIG_INT n = eigvecs_.rows();
   const FASTEIG_INT nev = options_.nev();
   const FASTEIG_INT maxiter = options_.maxiter();
-  std::string which = lanczos_lower_copy(options_.which());
+  std::string which = core::lanczos_lower_copy(options_.which());
   const int verbosity = options_.verbosity();
   const FASTEIG_INT print_every = options_.print_every();
   const FASTEIG_DOUBLE tol = options_.tol();
@@ -35,7 +35,7 @@ FASTEIG_INT LanczosSolver::solve() {
   if (nev <= 0) throw std::invalid_argument("LanczosSolver: nev must be > 0.");
   if (maxiter < nev) throw std::invalid_argument("LanczosSolver: maxiter must be >= nev.");
   if (maxiter > n) throw std::invalid_argument("LanczosSolver: maxiter must be <= n.");
-  validate_lanczos_which(which, /*allow_sai=*/true, "LanczosSolver");
+  core::validate_lanczos_which(which, /*allow_sai=*/true, "LanczosSolver");
 
   // Progress output setup.  A scalar Lanczos "iteration" is one Krylov vector
   // expansion, and print_every controls how often snapshots are emitted.
@@ -63,7 +63,7 @@ FASTEIG_INT LanczosSolver::solve() {
   bool converged = false;
   FASTEIG_INT it_stop = maxiter;
   FASTEIG_INT last_emitted_iter = 0;
-  LanczosSnapshot final;
+  core::LanczosSnapshot final;
 
   for (FASTEIG_INT it = 0; it < maxiter; ++it) {
     // 1. Normalize the current residual into the next basis vector q_it.
@@ -88,10 +88,10 @@ FASTEIG_INT LanczosSolver::solve() {
     // by the workspace.  For CUDA, that projected eigensolve can stay on device.
     if (!do_progress && !do_check) continue;
 
-    LanczosSnapshot snap = lanczos_workspace->compute_snapshot(
+    core::LanczosSnapshot snap = lanczos_workspace->compute_snapshot(
         m, nev, which, /*need_vectors=*/false, "LanczosSolver");
     if (do_progress) {
-      lanczos_emit_snapshot(snap, m, log_logger, console_logger);
+      core::lanczos_emit_snapshot(snap, m, log_logger, console_logger);
       last_emitted_iter = m;
     }
 
@@ -101,7 +101,7 @@ FASTEIG_INT LanczosSolver::solve() {
       final = lanczos_workspace->compute_snapshot(m, nev, which,
                                                   /*need_vectors=*/true, "LanczosSolver");
       if (!do_progress && print_every > 0) {
-        lanczos_emit_snapshot(final, m, log_logger, console_logger);
+        core::lanczos_emit_snapshot(final, m, log_logger, console_logger);
       }
       break;
     }
@@ -111,7 +111,7 @@ FASTEIG_INT LanczosSolver::solve() {
     final = lanczos_workspace->compute_snapshot(maxiter, nev, which,
                                                 /*need_vectors=*/true, "LanczosSolver");
     if (print_every > 0 && last_emitted_iter != maxiter) {
-      lanczos_emit_snapshot(final, maxiter, log_logger, console_logger);
+      core::lanczos_emit_snapshot(final, maxiter, log_logger, console_logger);
     }
   }
 

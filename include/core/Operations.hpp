@@ -1,6 +1,5 @@
 #pragma once
 
-#include "core/CsrMatrix.hpp"
 #include "core/LinearOperator.hpp"
 #include "core/MultiVector.hpp"
 #include "core/Vector.hpp"
@@ -33,25 +32,6 @@ double orthogonalize_active_columns(const MultiVector& X,
                                     FASTEIG_INT active_cols,
                                     const Vector& source,
                                     Vector& residual);
-
-void spmv(const CsrMatrix& A,
-          const Vector& x,
-          Vector& y,
-          double alpha = 1.0,
-          double beta = 0.0);
-void spmv_column(const CsrMatrix& A,
-                 const MultiVector& X,
-                 FASTEIG_INT col,
-                 Vector& y,
-                 double alpha = 1.0,
-                 double beta = 0.0);
-void spmv_block(const CsrMatrix& A,
-                const MultiVector& X,
-                FASTEIG_INT first_col,
-                FASTEIG_INT block_size,
-                MultiVector& Y,
-                double alpha = 1.0,
-                double beta = 0.0);
 
 void apply(const LinearOperator& op,
            const Vector& x,

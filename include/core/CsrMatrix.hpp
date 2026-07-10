@@ -34,19 +34,6 @@ public:
 
   virtual CsrMatrixData copy_to_host() const = 0;
 
-  void spmv(const Vector& x, Vector& y, double alpha = 1.0, double beta = 0.0) const {
-    apply(x, y, alpha, beta);
-  }
-
-  void spmv_column(const MultiVector& X, FASTEIG_INT col, Vector& y,
-                   double alpha = 1.0, double beta = 0.0) const {
-    apply_column(X, col, y, alpha, beta);
-  }
-
-  void spmv_block(const MultiVector& X, FASTEIG_INT first_col, FASTEIG_INT block_size,
-                  MultiVector& Y, double alpha = 1.0, double beta = 0.0) const {
-    apply_block(X, first_col, block_size, Y, alpha, beta);
-  }
 };
 
 class CpuCsrMatrix final : public CsrMatrix {

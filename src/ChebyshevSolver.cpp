@@ -1,6 +1,5 @@
 #include "ChebyshevSolver.hpp"
 
-#include "LanczosCommon.hpp"
 #include "core/Executor.hpp"
 #include "core/KrylovSubspace.hpp"
 #include "core/LinearOperator.hpp"

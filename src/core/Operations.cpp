@@ -94,29 +94,6 @@ double orthogonalize_active_columns(const MultiVector& X,
   return X.orthogonalize_active_columns(active_cols, source, residual);
 }
 
-void spmv(const CsrMatrix& A, const Vector& x, Vector& y, double alpha, double beta) {
-  apply(A, x, y, alpha, beta);
-}
-
-void spmv_column(const CsrMatrix& A,
-                 const MultiVector& X,
-                 FASTEIG_INT col,
-                 Vector& y,
-                 double alpha,
-                 double beta) {
-  apply_column(A, X, col, y, alpha, beta);
-}
-
-void spmv_block(const CsrMatrix& A,
-                const MultiVector& X,
-                FASTEIG_INT first_col,
-                FASTEIG_INT block_size,
-                MultiVector& Y,
-                double alpha,
-                double beta) {
-  apply_block(A, X, first_col, block_size, Y, alpha, beta);
-}
-
 void apply(const LinearOperator& op, const Vector& x, Vector& y, double alpha, double beta) {
   require_same_executor(op.executor(), x.executor(), "core::apply(op,x)");
   require_same_executor(op.executor(), y.executor(), "core::apply(op,y)");
