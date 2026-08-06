@@ -17,7 +17,10 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <random>
 #include <sstream>
+#include <stdexcept>
+#include <vector>
 
 namespace fasteig {
 namespace {
@@ -103,9 +106,9 @@ FASTEIG_INT ChebyshevSolver::solve() {
   const FASTEIG_INT nev = options_.nev();
   const FASTEIG_INT maxiter = options_.maxiter();
   const FASTEIG_INT degree = options_.degree();
+  const FASTEIG_DOUBLE tol = options_.tol();
   FASTEIG_DOUBLE lambda_max;
   FASTEIG_DOUBLE lambda_min;
-  FASTEIG_DOUBLE subspace_resnrm;
 
   MatrixXd V0;
   if (options_.v0().size() > 0) {
@@ -114,10 +117,49 @@ FASTEIG_INT ChebyshevSolver::solve() {
     V0 = MatrixXd::Random(n, nev);
   }
 
-  MatrixXd X = V0;
-  MatrixXd basis_vecs(static_cast<int>(nev), static_cast<int>(nev));
-  MatrixXd residuals(n, nev);
-  FASTEIG_INT info = 0;
+  // Keep one spare vector per requested eigenpair. Each
+  // locked Ritz vector is removed from the filtered block and one spare is
+  // activated, so the number of actively filtered vectors stays constant.
+  // For very small problems the ambient dimension limits the number of spares.
+  const FASTEIG_INT workspace_cols = std::min<FASTEIG_INT>(n, 2 * nev);
+  if (workspace_cols < nev) {
+    throw std::invalid_argument(
+        "ChebyshevSolver: nev cannot exceed the problem dimension.");
+  }
+
+  MatrixXd X(n, workspace_cols);
+  X.leftCols(static_cast<int>(nev)) = V0;
+  if (workspace_cols > nev) {
+    std::mt19937 generator(options_.seed().value_or(1u));
+    std::normal_distribution<double> distribution(0.0, 1.0);
+    for (int j = static_cast<int>(nev); j < X.cols(); ++j) {
+      for (int i = 0; i < X.rows(); ++i) {
+        X(i, j) = distribution(generator);
+      }
+    }
+  }
+
+  MatrixXd qr_basis;
+  MatrixXd qr_factor;
+  FASTEIG_INT info = core::cholesky_qr(X, qr_basis, qr_factor);
+  if (info != 0) {
+    status_ = info;
+    set_iterations(0);
+    return status_;
+  }
+  X = std::move(qr_basis);
+
+  std::vector<int> active;
+  active.reserve(static_cast<size_t>(nev));
+  for (int j = 0; j < static_cast<int>(nev); ++j) active.push_back(j);
+
+  FASTEIG_INT nlocked = 0;
+  FASTEIG_INT subspace_cols = nev;
+  VectorXd ritz_values;
+  MatrixXd ritz_vectors;
+  MatrixXd projected_vectors;
+  MatrixXd residuals;
+  VectorXd relative_residuals(static_cast<int>(nev));
   FASTEIG_INT it_done = 0;
   const bool verbose = options_.verbosity() != 0;
   fasteig_logger stdout_logger;
@@ -153,23 +195,78 @@ FASTEIG_INT ChebyshevSolver::solve() {
       stdout_logger.print_progress_note(iteration_message);
     }
 
-    chebyshev_filter(effective_op, X, degree, lambda_min, lambda_max, flip_sign);
+    MatrixXd filtered(n, static_cast<int>(active.size()));
+    for (int j = 0; j < filtered.cols(); ++j) {
+      filtered.col(j) = X.col(active[static_cast<size_t>(j)]);
+    }
+    chebyshev_filter(effective_op, filtered, degree, lambda_min, lambda_max,
+                     flip_sign);
 
-    MatrixXd R(static_cast<int>(nev), static_cast<int>(nev));
-    info = core::cholesky_qr(X, eigvecs_, R);
+    // Deflate the active block against the ordered, locked Ritz vectors.
+    if (nlocked > 0) {
+      const auto locked = X.leftCols(static_cast<int>(nlocked));
+      filtered.noalias() -= locked * (locked.transpose() * filtered);
+    }
+    for (int j = 0; j < filtered.cols(); ++j) {
+      X.col(active[static_cast<size_t>(j)]) = filtered.col(j);
+    }
+
+    MatrixXd basis;
+    MatrixXd R;
+    info = core::cholesky_qr(
+        X.leftCols(static_cast<int>(subspace_cols)), basis, R);
     if (info != 0) {
       const std::string failure_message =
-          "Decomposition failed. Matrix may not be positive definite.";
+          "QR decomposition failed during Chebyshev iteration.";
       problem_.logger().print_progress_note(failure_message);
       stderr_logger.print_progress_note(failure_message);
       break;
     }
 
-    X = eigvecs_;
-    eigvecs_ = apply_effective_to_host(effective_op, X);
-    basis_vecs = X.transpose() * eigvecs_;
-    eigvecs_ = eigvecs_ - X * basis_vecs;
-    subspace_resnrm = eigvecs_.norm();
+    RayleighRitz(effective_op, basis, ritz_values, ritz_vectors,
+                 projected_vectors, residuals);
+    X.leftCols(static_cast<int>(subspace_cols)) = ritz_vectors;
+
+    for (int j = 0; j < static_cast<int>(nev); ++j) {
+      const double denominator = std::abs(ritz_values[j]);
+      const double absolute_residual = residuals.col(j).norm();
+      relative_residuals[j] =
+          (denominator > 0.0) ? absolute_residual / denominator
+                              : absolute_residual;
+    }
+
+    VectorXd displayed_values = ritz_values.head(static_cast<int>(nev));
+    if (flip_sign) displayed_values *= -1.0;
+    problem_.logger().print_convergence_data(
+        displayed_values, relative_residuals, static_cast<int>(iter + 1));
+    if (options_.verbosity() >= 2) {
+      stdout_logger.print_convergence_data(
+          displayed_values, relative_residuals, static_cast<int>(iter + 1));
+    }
+
+    // Locking in order: All preceding Ritz vectors must have already been 
+    // locked to prevent a higher Ritz pair from being deflated before 
+    // a lower one has converged. This conservative strategy tends to 
+    // reduce the likelihood of missing some eigenvalues
+    while (nlocked < nev && relative_residuals[nlocked] <= tol) {
+      const int locked_index = static_cast<int>(nlocked);
+      active.erase(std::remove(active.begin(), active.end(), locked_index),
+                   active.end());
+      ++nlocked;
+      problem_.logger().print_locking_note(static_cast<int>(nlocked),
+                                           static_cast<int>(iter + 1));
+      if (options_.verbosity() >= 2) {
+        stdout_logger.print_locking_note(static_cast<int>(nlocked),
+                                         static_cast<int>(iter + 1));
+      }
+
+      if (subspace_cols < workspace_cols) {
+        active.push_back(static_cast<int>(subspace_cols));
+        ++subspace_cols;
+      }
+    }
+
+    const FASTEIG_DOUBLE subspace_resnrm = residuals.norm();
     std::ostringstream residual_message;
     residual_message << std::scientific << std::setprecision(2)
                      << "subspace residual norm = " << subspace_resnrm;
@@ -178,10 +275,23 @@ FASTEIG_INT ChebyshevSolver::solve() {
       stdout_logger.print_progress_note(residual_message.str());
     }
     it_done = iter + 1;
+    if (nlocked == nev) break;
+  }
+
+  if (info == 0 && ritz_values.size() == 0) {
+    MatrixXd basis;
+    MatrixXd R;
+    info = core::cholesky_qr(
+        X.leftCols(static_cast<int>(subspace_cols)), basis, R);
+    if (info == 0) {
+      RayleighRitz(effective_op, basis, ritz_values, ritz_vectors,
+                   projected_vectors, residuals);
+    }
   }
 
   if (info == 0) {
-    RayleighRitz(effective_op, X, eigvals_, eigvecs_, basis_vecs, residuals);
+    eigvals_ = ritz_values.head(static_cast<int>(nev));
+    eigvecs_ = ritz_vectors.leftCols(static_cast<int>(nev));
   }
 
   if (flip_sign) {

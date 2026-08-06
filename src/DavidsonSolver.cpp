@@ -9,8 +9,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
+#include <vector>
 
 namespace fasteig {
 
@@ -35,6 +38,10 @@ FASTEIG_INT DavidsonSolver::solve() {
   const FASTEIG_INT maxiter = options_.maxiter();
   const FASTEIG_INT maxblks = options_.maxblks();
 
+  if (maxblks < 1) {
+    throw std::invalid_argument("DavidsonSolver: maxblks must be at least 1.");
+  }
+
   if (options_.v0().size() > 0) {
     if (options_.v0().rows() != eigvecs_.rows()) {
       throw std::invalid_argument("DavidsonSolver: v0 row count does not match problem dimension.");
@@ -47,14 +54,14 @@ FASTEIG_INT DavidsonSolver::solve() {
     eigvecs_.setRandom();
   }
 
-  const size_t nrows = eigvecs_.rows();
-  const size_t ncols = eigvecs_.cols();
+  const int nrows = eigvecs_.rows();
+  const int ncols = eigvecs_.cols();
+  const int max_subspace_cols = static_cast<int>(maxblks) * ncols;
   int info = 0;
-  int row0, col0;
 
-  MatrixXd Q(nrows, maxblks * ncols), AQ(nrows, maxblks * ncols);
+  MatrixXd Q(nrows, max_subspace_cols), AQ(nrows, max_subspace_cols);
   MatrixXd AV(nrows, ncols), Ritzvecs(nrows, ncols), RES(nrows, ncols);
-  MatrixXd T(ncols * maxblks, ncols * maxblks), R(ncols, ncols),
+  MatrixXd T(max_subspace_cols, max_subspace_cols), R(ncols, ncols),
       G(ncols, ncols);
   VectorXd Ritzvals(ncols), resnrm(ncols);
   fasteig_logger stdout_logger(&std::cout);
@@ -72,21 +79,32 @@ FASTEIG_INT DavidsonSolver::solve() {
   RayleighRitz(effective_op, eigvecs_, Ritzvals, Ritzvecs, G, RES);
 
   const FASTEIG_DOUBLE tol = options_.tol();
+  // Match the MATLAB implementation: a Ritz vector is excluded from subsequent
+  // correction blocks only after satisfying the (possibly stricter) lock tolerance.
+  const FASTEIG_DOUBLE locktol = std::min<FASTEIG_DOUBLE>(1.0e-5, tol);
+
+  auto update_relative_residuals = [&]() {
+    for (int j = 0; j < ncols; ++j) {
+      const double denom =
+          (1.0 + std::abs(Ritzvals[j])) * Ritzvecs.col(j).norm();
+      const double abs_residual = RES.col(j).norm();
+      resnrm[j] = (denom > 0.0) ? (abs_residual / denom) : abs_residual;
+    }
+  };
+
+  update_relative_residuals();
   size_t it_done = 0;
   for (size_t iter = 0; iter < static_cast<size_t>(maxiter); ++iter) {
     T.setZero();
     Q.leftCols(ncols) = Ritzvecs;
-    for (size_t j = 0; j < ncols; j++) {
-      resnrm[j] = RES.col(j).norm();
+    for (int j = 0; j < ncols; ++j) {
       T(j, j) = Ritzvals[j];
       // Back out A * Ritzvecs from the residual.
       AQ.col(j) = RES.col(j) + Ritzvals[j] * Ritzvecs.col(j);
     }
+    int nv = ncols;
 
-    for (size_t jblk = 1; jblk < maxblks; jblk++) {
-      row0 = 0;
-      col0 = jblk * ncols;
-
+    for (int jblk = 1; jblk < static_cast<int>(maxblks); ++jblk) {
       problem_.logger().print_convergence_data(Ritzvals.head(nev), resnrm.head(nev),
                                                 static_cast<int>(iter + 1));
       if (options_.verbosity() >= 2) {
@@ -94,60 +112,81 @@ FASTEIG_INT DavidsonSolver::solve() {
                                              static_cast<int>(iter + 1));
       }
 
-      // Orthogonalize against previous basis vectors.
-      MatrixXd Temp = Q.leftCols(jblk * ncols).transpose() * RES;
-      RES = RES - Q.leftCols(jblk * ncols) * Temp;
-      Temp = Q.leftCols(jblk * ncols).transpose() * RES;
-      RES = RES - Q.leftCols(jblk * ncols) * Temp;
+      // ilock and iact are recomputed from the current Ritz residuals, as in
+      // davidson.m. Locked Ritz vectors remain in the Ritz block but do not
+      // contribute correction vectors to the expanding subspace.
+      std::vector<int> ilock;
+      std::vector<int> iact;
+      ilock.reserve(ncols);
+      iact.reserve(ncols);
+      for (int j = 0; j < ncols; ++j) {
+        if (std::abs(resnrm[j]) <= locktol) {
+          ilock.push_back(j);
+        } else {
+          iact.push_back(j);
+        }
+      }
 
-      // Orthonormalize within the block.
-      info = core::cholesky_qr(RES, eigvecs_, R);
+      const int nlock = static_cast<int>(ilock.size());
+      const int nact = static_cast<int>(iact.size());
+      if (nlock == ncols) break;
+
+      MatrixXd W(nrows, nact);
+      for (int j = 0; j < nact; ++j) {
+        W.col(j) = RES.col(iact[j]);
+      }
+
+      // Orthogonalize W(:,iact) against all current basis vectors.
+      MatrixXd Temp = Q.leftCols(nv).transpose() * W;
+      W.noalias() -= Q.leftCols(nv) * Temp;
+      Temp = Q.leftCols(nv).transpose() * W;
+      W.noalias() -= Q.leftCols(nv) * Temp;
+
+      // [V(:,b2), R] = qr(W(:,iact), 0), followed by H * V(:,b2).
+      MatrixXd new_basis;
+      info = core::householder_qr(W, new_basis, R);
       if (info != 0) {
         stdout_logger.print_progress_note(
-            "Cholesky factorization failed, info = " + std::to_string(info));
+            "QR factorization failed, info = " + std::to_string(info));
         std::exit(1);
       }
 
-      Q.block(row0, col0, nrows, ncols) = eigvecs_;
+      Q.middleCols(nv, nact) = new_basis;
 
-      AV = core::apply_to_host(effective_op, eigvecs_);
-      AQ.block(row0, col0, nrows, ncols) = AV;
+      AV = core::apply_to_host(effective_op, new_basis);
+      AQ.middleCols(nv, nact) = AV;
 
-      // Append the new projection blocks into T.
-      T.block(row0, col0, jblk * ncols, ncols) =
-          Q.leftCols(jblk * ncols).transpose() * AV;
-      T.block(col0, row0, ncols, jblk * ncols) =
-          T.block(row0, col0, jblk * ncols, ncols).transpose();
-      row0 = jblk * ncols;
-      col0 = row0;
-      T.block(row0, col0, ncols, ncols) = eigvecs_.transpose() * AV;
+      // Append the variable-width projection blocks into T.
+      T.block(0, nv, nv, nact) = Q.leftCols(nv).transpose() * AV;
+      T.block(nv, 0, nact, nv) = T.block(0, nv, nv, nact).transpose();
+      T.block(nv, nv, nact, nact) = new_basis.transpose() * AV;
+      nv += nact;
 
-      const int dim = ncols * (jblk + 1);
       MatrixXd T1 =
-          (T.block(0, 0, dim, dim) + T.block(0, 0, dim, dim).transpose()) /
-          2.0;
+          (T.topLeftCorner(nv, nv) + T.topLeftCorner(nv, nv).transpose()) / 2.0;
 
-      Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(
-          T1.block(0, 0, dim, dim));
-      MatrixXd eigenvectors = solver.eigenvectors();
-      VectorXd eigenvalues = solver.eigenvalues();
-      Ritzvecs = Q.leftCols((jblk + 1) * ncols) * eigenvectors.leftCols(ncols);
-      Ritzvals = eigenvalues.head(ncols);
-      RES = AQ.leftCols((jblk + 1) * ncols) * eigenvectors.leftCols(ncols);
-
-      for (size_t j = 0; j < ncols; j++) {
-        RES.col(j) = RES.col(j) - Ritzvecs.col(j) * Ritzvals[j];
-        resnrm[j] = RES.col(j).norm();
+      Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(T1);
+      if (solver.info() != Eigen::Success) {
+        throw std::runtime_error("DavidsonSolver: projected eigensolve failed.");
       }
+      const MatrixXd eigenvectors = solver.eigenvectors();
+      const VectorXd eigenvalues = solver.eigenvalues();
+      Ritzvecs = Q.leftCols(nv) * eigenvectors.leftCols(ncols);
+      Ritzvals = eigenvalues.head(ncols);
+      RES = AQ.leftCols(nv) * eigenvectors.leftCols(ncols);
+
+      for (int j = 0; j < ncols; ++j) {
+        RES.col(j).noalias() -= Ritzvecs.col(j) * Ritzvals[j];
+      }
+      update_relative_residuals();
     }
 
     it_done = iter + 1;
-    // Convergence check (relative residual norm, consistent with log reporting).
+    // Convergence and locking deliberately use different tolerances, matching
+    // the nconv/nlock distinction in davidson.m.
     bool converged = true;
-    for (size_t j = 0; j < static_cast<size_t>(nev); ++j) {
-      const double denom = (1.0 + std::abs(Ritzvals[static_cast<int>(j)])) * Ritzvecs.col(static_cast<int>(j)).norm();
-      const double rel = (denom > 0.0) ? (resnrm[static_cast<int>(j)] / denom) : resnrm[static_cast<int>(j)];
-      if (rel >= tol) {
+    for (int j = 0; j < static_cast<int>(nev); ++j) {
+      if (std::abs(resnrm[j]) >= tol) {
         converged = false;
         break;
       }
