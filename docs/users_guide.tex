@@ -1,0 +1,591 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  urlcolor=blue!65!black,
+  pdftitle={FASTEIG User's Guide}
+}
+
+\lstdefinestyle{terminal}{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{black!3},
+  frame=single,
+  framerule=0.3pt,
+  columns=fullflexible,
+  keepspaces=true,
+  breaklines=true,
+  showstringspaces=false
+}
+\lstset{style=terminal}
+
+\newcommand{\fasteig}{\textsc{fasteig}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{\fasteig{} User's Guide}
+\author{Based on the FASTEIG source distribution}
+\date{Repository version 1.0.0\\Guide revised August 7, 2026}
+
+\begin{document}
+\setlength{\emergencystretch}{3em}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Introduction}
+
+\fasteig{} is a C++17 library and example program for computing selected
+eigenpairs of large sparse, real matrices.  A stored standard problem has the
+form
+\[
+    A x = \lambda x,
+\]
+and an optional generalized problem has the form
+\[
+    A x = \lambda B x.
+\]
+The command-line driver reads the matrices and solver settings from a small
+two-column input file.  It can run the supported algorithms on a CPU; CUDA
+builds can additionally execute Lanczos and Block Lanczos on an NVIDIA GPU.
+
+This guide describes the repository as it currently exists.  In particular,
+Section~\ref{sec:cmake-limitations} distinguishes the CMake library build from
+the Makefile-based example and CUDA builds.
+
+\section{Prerequisites}
+
+\subsection{Required software}
+
+\begin{itemize}[leftmargin=*]
+  \item A C++17 compiler.  The top-level CMake file recognizes GCC, Clang,
+        Intel LLVM (\code{icpx}), and Intel Classic compilers.
+  \item CMake 3.20 or newer for the CMake library build.
+  \item Eigen headers.  Eigen 3.4 is a suitable choice.  Eigen is header-only,
+        but its include directory must contain \code{Eigen/Core}.
+  \item A BLAS/LAPACK implementation.  The CMake build can use system
+        BLAS/LAPACK, Intel oneMKL, Cray LibSci, or a fetched OpenBLAS copy.
+\end{itemize}
+
+\subsection{Optional CPU packages}
+
+\paragraph{Intel oneMKL.}
+Enable oneMKL with \code{-DUSE\_MKL=ON}.  FASTEIG deliberately uses the MKL
+LP64 integer interface and the GNU threading layer.  Set \code{MKLROOT} either
+in the environment (usually by sourcing the oneAPI setup script) or on the
+CMake command line.  MKL also supplies Pardiso, which FASTEIG uses for CPU
+shift-and-invert (\code{which SAI}) when Eigen's MKL integration is enabled.
+
+\paragraph{Cray LibSci.}
+On a Cray system, configure with \code{-DUSE\_LIBSCI=ON} and use the Cray
+compiler wrappers.  The CMake logic looks first for \code{sci\_gnu}, then for
+the \code{cray-libsci} pkg-config package.  \code{USE\_MKL} and
+\code{USE\_LIBSCI} are mutually exclusive.
+
+\paragraph{OpenBLAS.}
+With neither MKL nor LibSci selected, CMake searches for system BLAS and
+LAPACK.  If they are unavailable, it fetches OpenBLAS 0.3.27 into
+\code{openblas/} in the source tree and builds it.  This fallback requires Git
+and network access during configuration.  Installing BLAS/LAPACK through the
+operating system avoids that download.
+
+\subsection{Optional GPU packages}
+
+A GPU build requires:
+\begin{itemize}[leftmargin=*]
+  \item an NVIDIA GPU supported by the selected CUDA toolkit;
+  \item the CUDA compiler \code{nvcc}; and
+  \item cuSPARSE, cuSOLVER, cuBLAS, and the CUDA runtime.
+\end{itemize}
+
+NVIDIA cuDSS is optional for ordinary GPU Lanczos calculations, but is
+required for GPU shift-and-invert calculations (\code{which SAI}).  The
+repository supplies \code{tools/install\_cudss.sh}, which can install a CUDA
+12 or CUDA 13 Python wheel into project space, or unpack an NVIDIA tarball.
+
+\section{Building with CMake}
+\label{sec:cmake}
+
+Run all commands in this section from the repository root.
+
+\subsection{Basic CPU build}
+
+If Eigen is already installed, point \code{EIGEN\_DIR} at the directory that
+directly contains \code{Eigen/Core}.  For example:
+
+\begin{lstlisting}
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DEIGEN_DIR=/path/to/eigen-3.4.0 \
+  -DBUILD_EXAMPLES=OFF \
+  -DBUILD_TESTS=OFF
+cmake --build build -j 8
+\end{lstlisting}
+
+If \code{EIGEN\_DIR} is omitted, CMake first checks for an existing
+\code{eigen/Eigen/Core} below the source directory.  Otherwise it fetches
+Eigen's \code{master} branch into \code{eigen/}; this also requires Git and
+network access.
+
+The resulting static library is
+\code{build/lib/libfasteig\_Generic.a}.  Change its platform suffix with, for
+example, \code{-DPLAT=Perlmutter}, which produces
+\code{libfasteig\_Perlmutter.a}.
+
+\subsection{CMake build with Intel oneMKL}
+
+After making the oneAPI environment available, use:
+
+\begin{lstlisting}
+source /path/to/oneapi/setvars.sh
+cmake -S . -B build-mkl \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DEIGEN_DIR=/path/to/eigen-3.4.0 \
+  -DUSE_MKL=ON \
+  -DMKLROOT="$MKLROOT" \
+  -DBUILD_EXAMPLES=OFF \
+  -DBUILD_TESTS=OFF
+cmake --build build-mkl -j 8
+\end{lstlisting}
+
+If the environment has not set \code{MKLROOT}, replace the shell expansion in
+the command with the actual MKL installation prefix.  Do not select the ILP64
+interface: the current Eigen/Pardiso path expects LP64 integers.
+
+\subsection{CMake build with Cray LibSci}
+
+A typical Cray configuration is:
+
+\begin{lstlisting}
+CC=cc CXX=CC cmake -S . -B build-libsci \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DEIGEN_DIR=/path/to/eigen-3.4.0 \
+  -DUSE_LIBSCI=ON \
+  -DPLAT=Perlmutter \
+  -DBUILD_EXAMPLES=OFF \
+  -DBUILD_TESTS=OFF
+cmake --build build-libsci -j 8
+\end{lstlisting}
+
+The exact environment modules and compiler wrappers are site-specific.
+
+\subsection{Current CMake limitations}
+\label{sec:cmake-limitations}
+
+The current top-level CMake configuration builds the CPU static library only.
+It does not yet define CUDA sources or a CUDA option.  It also does not define
+an \code{install()} rule.  Therefore ``installation'' currently means retaining
+the library in the build tree, or manually copying the archive and the
+\code{include/} tree to an application prefix.
+
+Although \code{BUILD\_EXAMPLES} defaults to \code{ON}, this repository revision
+does not contain \code{examples/CMakeLists.txt}; similarly, there is no
+\code{tests/CMakeLists.txt}.  Use \code{BUILD\_EXAMPLES=OFF} and
+\code{BUILD\_TESTS=OFF} for a working CMake configuration.  Build the supplied
+command-line programs with the Makefiles as described next.
+
+\section{Building the Command-Line Programs}
+
+The checked-in Makefiles produce the complete runnable examples and are the
+current build route for CUDA.  They use settings from \code{make.inc}.  That
+file contains machine-specific paths, so make a local copy and edit it rather
+than relying on its checked-in values:
+
+\begin{lstlisting}
+cp make.inc make.inc.local
+# Edit make.inc.local: set CXX, CC, PLAT, EIGEN, MKLROOT,
+# CUDA_PATH, CUDA_ARCH, and related flags for this machine.
+\end{lstlisting}
+
+Here \code{EIGEN} is the directory containing \code{Eigen/Core},
+\code{CUDA\_ARCH} is the NVIDIA compute capability without a decimal point
+(for example, \code{80} for SM 8.0), and \code{PLAT} determines the library
+file suffix.
+
+\subsection{CPU executable}
+
+For the default MKL/Pardiso configuration:
+
+\begin{lstlisting}
+make MAKEINC=make.inc.local
+make -C examples MAKEINC=../make.inc.local
+\end{lstlisting}
+
+This produces the library \code{libfasteig\_<PLAT>.a} at the repository root
+and the executable \code{examples/runfasteig\_cpu}.
+
+To use Eigen's native sparse LDLT instead of MKL/Pardiso, remove MKL flags from
+the build consistently:
+
+\begin{lstlisting}
+make -C src MAKEINC=../make.inc.local clean
+make -C examples MAKEINC=../make.inc.local clean
+make MAKEINC=make.inc.local USE_MKL=""
+make -C examples MAKEINC=../make.inc.local USE_MKL="" MKL=""
+\end{lstlisting}
+
+\subsection{GPU executable}
+
+After setting \code{CUDA\_PATH}, \code{CUDA\_ARCH}, and \code{NVCC} in the
+local make include, build with:
+
+\begin{lstlisting}
+make MAKEINC=make.inc.local USE_CUDA=1
+make -C examples MAKEINC=../make.inc.local USE_CUDA=1
+\end{lstlisting}
+
+This creates both \code{runfasteig\_cpu} and \code{runfasteig\_gpu}.  The GPU
+driver selects a CUDA executor for \code{solver Lanczos} and
+\code{solver BlockLanczos}.  Other solver names in the GPU executable continue
+to use their CPU implementations, so use \code{runfasteig\_cpu} for clarity
+when selecting them.
+
+The CUDA backend requires a matrix stored in one of FASTEIG's input formats.
+Matrix-free operators are CPU-only in the current driver.  Generalized
+problems should also be run on the CPU; they are currently supported only by
+Krylov--Schur, which is not dispatched to the CUDA backend.
+
+\subsection{Installing and enabling cuDSS}
+\label{sec:cudss}
+
+For GPU \code{SAI}, install cuDSS into the default checkout-local location:
+
+\begin{lstlisting}
+tools/install_cudss.sh
+make -C examples MAKEINC=../make.inc.local USE_CUDA=1
+\end{lstlisting}
+
+If direct package downloads are unavailable, download the Linux cuDSS archive
+from NVIDIA and run:
+
+\begin{lstlisting}
+tools/install_cudss.sh --prefix /project/path/cudss \
+  --tarball /path/to/cudss-linux-archive.tar.xz
+source /project/path/cudss/cudss-env.sh
+make -C examples MAKEINC=../make.inc.local USE_CUDA=1 \
+  CUDSS_PATH="$CUDSS_PATH" CUDSS_LIBDIR="$CUDSS_LIBDIR"
+\end{lstlisting}
+
+The Makefile enables cuDSS automatically when it finds both
+\code{include/cudss.h} and \code{libcudss.so} (or
+\code{libcudss.so.0}).  To build CUDA support without cuDSS, pass
+\code{USE\_CUDSS=0}; ordinary \code{SR}, \code{LR}, \code{SM}, \code{LM}, and
+\code{BE} Lanczos runs do not require cuDSS.
+
+\section{Preparing Matrices and an Input File}
+
+\subsection{Matrix requirements and formats}
+
+The command-line driver reads real, square sparse matrices.  Eigensolvers in
+this distribution are intended for symmetric/self-adjoint problems.  The
+recommended interchange format is Matrix Market coordinate format
+(\code{.mtx}).  A minimal symmetric example is:
+
+\begin{lstlisting}
+%%MatrixMarket matrix coordinate real symmetric
+3 3 5
+1 1 2.0
+2 1 -1.0
+2 2 2.0
+3 2 -1.0
+3 3 2.0
+\end{lstlisting}
+
+Matrix Market indices are one-based.  For a file declared \code{symmetric} or
+\code{skew-symmetric}, store one triangle plus the diagonal; the loader keeps
+one triangle and applies the symmetry during matrix-vector products.  A real
+coordinate file is safest: the current reader expects row, column, and one
+floating-point value per entry.
+
+The parser also accepts:
+\begin{itemize}[leftmargin=*]
+  \item \code{.rsa}: a Harwell--Boeing/RSA-style text matrix in compressed
+        sparse column form; and
+  \item \code{.fei}: FASTEIG's binary CSC form, containing three
+        \code{FASTEIG\_INT} header values (rows, columns, nonzeros), followed by
+        the zero-based column-pointer array, row-index array, and
+        \code{FASTEIG\_DOUBLE} values.
+\end{itemize}
+
+The extension \code{.hdf} is recognized by format detection but is not loaded
+by the current input parser.  Do not use it for command-line runs.  For a
+generalized problem, \code{amatrix} and \code{bmatrix} must have the same
+format and dimension; \(B\) should be symmetric positive definite.
+
+\subsection{Input-deck syntax}
+
+Each non-comment record contains exactly a key and a whitespace-separated
+value.  Keys are case-insensitive.  A line whose first token begins with
+\code{\#} or \code{\%} is a comment.  Avoid inline comments and paths containing
+spaces.  Matrix paths are interpreted relative to the directory from which the
+executable is launched, not relative to the input file itself.
+
+A practical standard-problem input file is:
+
+\begin{lstlisting}
+# Matrix and output
+amatrix ./Sparse_Matrices/SiO.mtx
+output_prefix SiO
+output\_format text
+
+# Requested eigenpairs
+nev 5
+which SR
+solver Lanczos
+
+# Iteration controls
+maxiter 200
+maxdim 20
+blksize 5
+tol 1e-8
+seed 1
+
+# Console output
+verbosity 2
+print\_every 10
+\end{lstlisting}
+
+For a generalized problem, add a matching matrix:
+
+\begin{lstlisting}
+amatrix /data/A.mtx
+bmatrix /data/B.mtx
+solver KrylovSchur
+which SR
+nev 10
+maxiter 500
+maxdim 40
+tol 1e-10
+output_prefix generalized
+output_format text
+\end{lstlisting}
+
+\subsection{Input keys}
+
+\renewcommand{\arraystretch}{1.15}
+\begin{longtable}{>{\ttfamily}p{0.18\textwidth}p{0.18\textwidth}p{0.55\textwidth}}
+\toprule
+\normalfont Key & Default & Meaning \\
+\midrule
+\endhead
+amatrix & required & Path to the standard matrix \(A\). \\
+bmatrix & none & Optional matrix \(B\) for \(Ax=\lambda Bx\).  Currently CPU Krylov--Schur only. \\
+solver & Lanczos & Lanczos, BlockLanczos, BlockKrylovSchur, KrylovSchur, Davidson, LOBPCG, Chebyshev, SPPC, RMM-DIIS, or auto. \\
+nev & 100 & Number of requested eigenpairs; must be positive and no greater than the matrix dimension. \\
+which & LM & Target: SR (smallest algebraic), LR (largest algebraic), SM (smallest magnitude), LM (largest magnitude), BE (both ends), or SAI (shift-and-invert).  Not every solver accepts every target. \\
+shift & 0.0 & Shift \(\sigma\) for SAI, which applies an operator based on \((A-\sigma I)^{-1}\). \\
+maxiter & 10 & Maximum solver iterations or Krylov steps, depending on the algorithm. \\
+maxdim & 20 & Maximum subspace dimension for applicable solvers; SPPC uses it as its split dimension. \\
+blksize & 5 & Initial block size for block algorithms. \\
+tol & $10^{-6}$ & Positive convergence tolerance. \\
+seed & unspecified & Nonnegative random seed for reproducible initial vectors. \\
+logfile & logfile & Output prefix; \code{output\_prefix} is an alias. \\
+output\_format & text & Output format.  Only \code{text} is currently implemented. \\
+verbosity & 1 & Console level 1 prints the run header and final eigenpairs; level 2 also enables iteration summaries.  Values are clamped to 1 or 2. \\
+print\_every & 0 & Progress-printing cadence for solvers that use it; zero disables cadence-based progress. \\
+verbose & --- & Backward-compatible Boolean key that enables normal console output. \\
+\bottomrule
+\end{longtable}
+
+The data structure contains a Chebyshev \code{degree} setting (default 10) and
+a Davidson \code{maxblks} setting, but the current file parser does not assign
+those two keys.  Consequently, command-line input decks use their compiled
+defaults unless the C++ driver is changed to set them programmatically.
+
+\subsection{Choosing a solver and target}
+
+For a first run, use \code{Lanczos} with \code{SR} or \code{LR}.  The Lanczos
+family accepts \code{SR}, \code{LR}, \code{SM}, \code{LM}, and \code{BE}; scalar
+Lanczos also accepts \code{SAI}.  \code{KrylovSchur} supports standard and
+generalized problems, but generalized \code{SAI} is rejected.  The block
+Krylov--Schur implementation does not support generalized problems or
+\code{SAI}.  Chebyshev filtering is designed for an end of the spectrum; the
+implementation reverses the operator for \code{LR}/\code{LM}.
+
+Use \code{SAI} to find eigenvalues near \code{shift}.  It incurs a sparse
+factorization setup cost and needs a stored matrix.  The CPU backend reports
+either \code{MKL PardisoLDLT} or \code{Eigen SimplicialLDLT}; the GPU backend
+reports \code{NVIDIA cuDSS}.
+
+\section{Running on CPUs}
+
+The input paths in the supplied \code{examples/SiO.input} assume that the
+working directory is \code{examples}.  Run:
+
+\begin{lstlisting}
+cd examples
+./runfasteig_cpu SiO.input
+\end{lstlisting}
+
+The driver exits with status 0 on success, 1 for a command-line or input error,
+and 2 when the solver returns a nonzero status.  With
+\code{output\_prefix SiO} and \code{solver Lanczos}, the text log is named
+\code{SiO\_Lanczos.log}.
+
+Control CPU threading with the OpenMP and math-library environment.  For an
+MKL build on a 16-core allocation:
+
+\begin{lstlisting}
+export OMP_NUM_THREADS=16
+export MKL_NUM_THREADS=16
+export OMP_PLACES=cores
+export OMP_PROC_BIND=spread
+export OMP_DYNAMIC=false
+export MKL_DYNAMIC=false
+./runfasteig_cpu SiO.input
+\end{lstlisting}
+
+On a Slurm system, request one process and assign its cores explicitly, for
+example:
+
+\begin{lstlisting}
+srun -N 1 -n 1 -c 16 --cpu-bind=cores \
+  ./runfasteig_cpu SiO.input
+\end{lstlisting}
+
+FASTEIG's example driver is a single-process program; do not launch multiple
+MPI ranks unless each rank is intentionally running an independent problem.
+
+\section{Running on NVIDIA GPUs}
+
+Use the same input deck and select the backend with the executable name.  Keep
+\code{solver Lanczos} (or \code{solver BlockLanczos}) in the deck:
+
+\begin{lstlisting}
+cd examples
+./runfasteig_gpu SiO.input
+\end{lstlisting}
+
+For an ordinary Lanczos target such as \code{SR}, no cuDSS installation is
+needed.  For interior eigenvalues, use both \code{which SAI} and a shift:
+
+\begin{lstlisting}
+solver Lanczos
+which SAI
+shift 0.25
+nev 5
+\end{lstlisting}
+
+That run requires a build with \code{USE\_CUDA=1 USE\_CUDSS=1}.  If the program
+reports that CUDA SAI requires cuDSS, rebuild after following the cuDSS steps
+in Section~\ref{sec:cudss}.
+
+A typical Slurm GPU launch is:
+
+\begin{lstlisting}
+export OMP_NUM_THREADS=16
+export MKL_NUM_THREADS=16
+export OMP_PLACES=cores
+export OMP_PROC_BIND=close
+export OMP_DYNAMIC=false
+export MKL_DYNAMIC=false
+srun -n 1 -c 16 --gpus-per-task=1 --gpu-bind=single:1 \
+  --cpu-bind=cores ./runfasteig_gpu SiO.input
+\end{lstlisting}
+
+GPU work is not selected merely by compiling with CUDA: run the
+\code{runfasteig\_gpu} executable and choose Lanczos or BlockLanczos.  The
+current CUDA executor accepts stored CSR data derived from the input matrix;
+it does not accept the matrix-free callback path.
+
+\section{Verification}
+
+The repository includes a Python 3 integration harness and a reference spectrum
+for \code{SiO.mtx}.  After building \code{examples/runfasteig\_cpu}, run from
+the repository root:
+
+\begin{lstlisting}
+python3 tests/scripts/run_suite.py --matrix SiO
+\end{lstlisting}
+
+To test one solver and one end of the spectrum:
+
+\begin{lstlisting}
+python3 tests/scripts/run_case.py \
+  --solver Lanczos --which SR --matrix SiO
+\end{lstlisting}
+
+The test harness checks reported residuals and eigenvalues against
+\code{tests/reference/SiO.out.121mpi}.  It requires only Python 3, not SciPy.
+
+\section{Troubleshooting}
+
+\begin{description}[style=nextline]
+  \item[CMake reports that \code{Eigen/Core} is missing.]
+    Set \code{EIGEN\_DIR} to the directory immediately above \code{Eigen}, not
+    to the \code{Eigen} directory itself.  Common choices are
+    \code{/usr/include/eigen3} and a source checkout such as
+    \code{/opt/eigen-3.4.0}; verify that
+    \code{<EIGEN\_DIR>/Eigen/Core} exists.
+
+  \item[CMake tries to clone OpenBLAS.]
+    Install development packages for both BLAS and LAPACK, provide a discoverable
+    vendor implementation, or configure with MKL/LibSci.  Otherwise network
+    access is expected for the fallback.
+
+  \item[CMake fails while adding \code{examples} or \code{tests}.]
+    Reconfigure with \code{-DBUILD\_EXAMPLES=OFF -DBUILD\_TESTS=OFF}.  Build the
+    drivers with their Makefile.
+
+  \item[The matrix file cannot be opened.]
+    Resolve \code{amatrix} and \code{bmatrix} from the launch directory.  For
+    example, the supplied relative path works after \code{cd examples}, not
+    necessarily from the repository root.
+
+  \item[A generalized problem is rejected.]
+    Use \code{solver KrylovSchur} and the CPU executable.  Ensure \(A\) and
+    \(B\) have identical dimensions and file-format extensions.
+
+  \item[GPU execution says a stored CSR matrix is required.]
+    Supply \code{amatrix} in \code{.mtx}, \code{.rsa}, or \code{.fei} format.
+    The current GPU driver cannot use a matrix-free callback.
+
+  \item[GPU SAI says cuDSS is unavailable.]
+    Confirm that \code{CUDSS\_PATH/include/cudss.h} and a cuDSS shared library
+    under \code{CUDSS\_LIBDIR} exist, then clean and rebuild with
+    \code{USE\_CUDA=1 USE\_CUDSS=1}.  Source the generated
+    \code{cudss-env.sh} before both building and running when using a custom
+    prefix.
+
+  \item[Performance is lower than expected.]
+    Use a Release build, match thread counts to the allocated cores, disable
+    dynamic OpenMP/MKL resizing, and choose the correct \code{CUDA\_ARCH} for a
+    GPU build.  Avoid oversubscribing a batch allocation.
+\end{description}
+
+\section{Quick Reference}
+
+\paragraph{CPU.}
+\begin{lstlisting}
+make MAKEINC=make.inc.local
+make -C examples MAKEINC=../make.inc.local
+cd examples
+./runfasteig_cpu SiO.input
+\end{lstlisting}
+
+\paragraph{GPU.}
+\begin{lstlisting}
+make MAKEINC=make.inc.local USE_CUDA=1
+make -C examples MAKEINC=../make.inc.local USE_CUDA=1
+cd examples
+./runfasteig_gpu SiO.input
+\end{lstlisting}
+
+\paragraph{Compile this guide.}
+From the repository root:
+\begin{lstlisting}
+pdflatex -output-directory=docs docs/fasteig_user_guide.tex
+pdflatex -output-directory=docs docs/fasteig_user_guide.tex
+\end{lstlisting}
+
+\end{document}
