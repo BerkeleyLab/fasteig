@@ -288,6 +288,78 @@ LanczosSnapshot lanczos_prepare_final_snapshot(const LanczosSnapshot& snapshot,
   return out;
 }
 
+LanczosSnapshot lanczos_snapshot_head(const LanczosSnapshot& snapshot,
+                                      FASTEIG_INT count,
+                                      const char* solver_name) {
+  if (count < 0 || count > snapshot.lam.size() || count > snapshot.rel_res.size() ||
+      (snapshot.Csel.size() > 0 && count > snapshot.Csel.cols())) {
+    throw std::invalid_argument(std::string(solver_name) +
+                                ": invalid snapshot truncation.");
+  }
+
+  LanczosSnapshot out;
+  out.lam = snapshot.lam.head(static_cast<int>(count));
+  out.rel_res = snapshot.rel_res.head(static_cast<int>(count));
+  if (snapshot.Csel.size() > 0) {
+    out.Csel = snapshot.Csel.leftCols(static_cast<int>(count));
+  }
+  return out;
+}
+
+VectorXd lanczos_absolute_residuals(const LanczosSnapshot& snapshot) {
+  if (snapshot.lam.size() != snapshot.rel_res.size()) {
+    throw std::invalid_argument(
+        "lanczos_absolute_residuals: Ritz-value/residual size mismatch.");
+  }
+  return (snapshot.rel_res.array() * (1.0 + snapshot.lam.array().abs())).matrix();
+}
+
+LanczosSnapshot krylov_schur_progress_snapshot(
+    const LanczosSnapshot& snapshot,
+    FASTEIG_INT nev,
+    const std::string& which,
+    FASTEIG_DOUBLE shift,
+    const char* solver_name) {
+  LanczosSnapshot out = lanczos_snapshot_head(snapshot, nev, solver_name);
+  out.rel_res = lanczos_absolute_residuals(out);
+  if (which == "sai") {
+    for (int j = 0; j < out.lam.size(); ++j) {
+      if (out.lam(j) == 0.0) {
+        throw std::runtime_error(std::string(solver_name) +
+                                 ": zero shift-invert Ritz value.");
+      }
+      out.lam(j) = shift + 1.0 / out.lam(j);
+    }
+  }
+  return out;
+}
+
+MatrixXd krylov_schur_restart_projection(const LanczosSnapshot& snapshot,
+                                         FASTEIG_INT retained_cols,
+                                         FASTEIG_DOUBLE beta_next,
+                                         const char* solver_name) {
+  if (retained_cols <= 0 || retained_cols > snapshot.lam.size()) {
+    throw std::invalid_argument(std::string(solver_name) +
+                                ": invalid retained Ritz-vector count.");
+  }
+  if (snapshot.Csel.rows() <= retained_cols ||
+      snapshot.Csel.cols() < retained_cols) {
+    throw std::invalid_argument(std::string(solver_name) +
+                                ": restart coefficient matrix is too small.");
+  }
+
+  MatrixXd projected = MatrixXd::Zero(static_cast<int>(retained_cols + 1),
+                                      static_cast<int>(retained_cols + 1));
+  for (FASTEIG_INT j = 0; j < retained_cols; ++j) {
+    projected(static_cast<int>(j), static_cast<int>(j)) = snapshot.lam(static_cast<int>(j));
+    const double coupling =
+        beta_next * snapshot.Csel(snapshot.Csel.rows() - 1, static_cast<int>(j));
+    projected(static_cast<int>(retained_cols), static_cast<int>(j)) = coupling;
+    projected(static_cast<int>(j), static_cast<int>(retained_cols)) = coupling;
+  }
+  return projected;
+}
+
 void lanczos_emit_snapshot(const LanczosSnapshot& snapshot,
                            FASTEIG_INT iter_label,
                            fasteig_logger* log_logger,

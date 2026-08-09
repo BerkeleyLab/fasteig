@@ -78,6 +78,24 @@ LanczosSnapshot lanczos_prepare_final_snapshot(const LanczosSnapshot& snapshot,
                                                FASTEIG_DOUBLE shift,
                                                const char* solver_name);
 
+LanczosSnapshot lanczos_snapshot_head(const LanczosSnapshot& snapshot,
+                                      FASTEIG_INT count,
+                                      const char* solver_name);
+
+VectorXd lanczos_absolute_residuals(const LanczosSnapshot& snapshot);
+
+LanczosSnapshot krylov_schur_progress_snapshot(
+    const LanczosSnapshot& snapshot,
+    FASTEIG_INT nev,
+    const std::string& which,
+    FASTEIG_DOUBLE shift,
+    const char* solver_name);
+
+MatrixXd krylov_schur_restart_projection(const LanczosSnapshot& snapshot,
+                                         FASTEIG_INT retained_cols,
+                                         FASTEIG_DOUBLE beta_next,
+                                         const char* solver_name);
+
 void lanczos_emit_snapshot(const LanczosSnapshot& snapshot,
                            FASTEIG_INT iter_label,
                            fasteig_logger* log_logger,

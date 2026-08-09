@@ -41,6 +41,11 @@ public:
                                                  bool need_vectors,
                                                  const char* solver_name) = 0;
 
+  virtual void prepare_krylov_schur_restart(
+      FASTEIG_INT retained_cols,
+      const LanczosSnapshot& snapshot,
+      const char* solver_name) = 0;
+
   virtual void finalize_eigenpairs(const LinearOperator& op,
                                    const MultiVector& basis,
                                    FASTEIG_INT active_cols,
@@ -79,6 +84,11 @@ public:
                                          bool need_vectors,
                                          const char* solver_name) override;
 
+  void prepare_krylov_schur_restart(
+      FASTEIG_INT retained_cols,
+      const LanczosSnapshot& snapshot,
+      const char* solver_name) override;
+
   void finalize_eigenpairs(const LinearOperator& op,
                            const MultiVector& basis,
                            FASTEIG_INT active_cols,
@@ -93,6 +103,7 @@ private:
   MatrixXd T_;
   MatrixXd beta_block_;
   double beta_next_ = 0.0;
+  FASTEIG_INT restart_coupling_row_ = -1;
 };
 
 std::unique_ptr<LanczosWorkspace> make_lanczos_workspace(const Executor& exec,

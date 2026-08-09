@@ -12,6 +12,7 @@ void launch_set_lanczos_projected_matrix_entry(double* d_T,
                                                int it,
                                                double beta,
                                                double alpha,
+                                               bool record_beta,
                                                cudaStream_t stream);
 
 void launch_set_lanczos_projected_matrix_entry_from_device(double* d_T,

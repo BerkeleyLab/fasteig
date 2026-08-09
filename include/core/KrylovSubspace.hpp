@@ -37,6 +37,8 @@ public:
   void apply_operator_to_basis_column(FASTEIG_INT basis_col);
   double orthogonalize_operator_result(FASTEIG_INT active_cols);
   double residual_norm() const;
+  void rotate_basis(FASTEIG_INT active_cols,
+                    const Eigen::Ref<const MatrixXd>& coefficients);
 
   Vector& residual() noexcept { return residual_; }
   const Vector& residual() const noexcept { return residual_; }

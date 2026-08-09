@@ -31,6 +31,28 @@ void CpuMultiVector::copy_from(const MultiVector& src) {
   values_ = cpu_src->values_;
 }
 
+void CpuMultiVector::copy_columns_from(FASTEIG_INT dst_first_col,
+                                       const MultiVector& src,
+                                       FASTEIG_INT src_first_col,
+                                       FASTEIG_INT column_count) {
+  if (&src.executor() != &exec_) {
+    throw std::invalid_argument("CpuMultiVector::copy_columns_from: executor mismatch.");
+  }
+  if (dst_first_col < 0 || src_first_col < 0 || column_count < 0 ||
+      dst_first_col + column_count > cols() ||
+      src_first_col + column_count > src.cols() || src.rows() != rows()) {
+    throw std::invalid_argument("CpuMultiVector::copy_columns_from: dimension mismatch.");
+  }
+  const auto* cpu_src = dynamic_cast<const CpuMultiVector*>(&src);
+  if (!cpu_src) {
+    throw std::invalid_argument("CpuMultiVector::copy_columns_from: source is not a CpuMultiVector.");
+  }
+  if (column_count == 0) return;
+  values_.middleCols(static_cast<int>(dst_first_col), static_cast<int>(column_count)) =
+      cpu_src->values_.middleCols(static_cast<int>(src_first_col),
+                                  static_cast<int>(column_count));
+}
+
 void CpuMultiVector::copy_column_from(FASTEIG_INT col, const Vector& src) {
   if (col < 0 || col >= cols()) {
     throw std::invalid_argument("CpuMultiVector::copy_column_from: column out of range.");
@@ -146,15 +168,30 @@ double CpuMultiVector::orthogonalize_active_columns(FASTEIG_INT active_cols,
 
 MatrixXd CpuMultiVector::multiply_active_columns(FASTEIG_INT active_cols,
                                                  const Eigen::Ref<const MatrixXd>& coeffs) const {
-  if (active_cols < 0 || active_cols > cols()) {
-    throw std::invalid_argument("CpuMultiVector::multiply_active_columns: invalid active column count.");
+  auto result = exec_.create_multivector(rows(), static_cast<FASTEIG_INT>(coeffs.cols()));
+  right_multiply_active_columns(active_cols, coeffs, *result);
+  return result->copy_to_host();
+}
+
+void CpuMultiVector::right_multiply_active_columns(
+    FASTEIG_INT active_cols,
+    const Eigen::Ref<const MatrixXd>& coeffs,
+    MultiVector& result) const {
+  if (&result.executor() != &exec_) {
+    throw std::invalid_argument("CpuMultiVector::right_multiply_active_columns: executor mismatch.");
   }
-  if (coeffs.rows() != static_cast<int>(active_cols)) {
-    throw std::invalid_argument("CpuMultiVector::multiply_active_columns: coefficient row mismatch.");
+  if (active_cols < 0 || active_cols > cols() ||
+      coeffs.rows() != static_cast<int>(active_cols) ||
+      result.rows() != rows() || result.cols() != coeffs.cols()) {
+    throw std::invalid_argument("CpuMultiVector::right_multiply_active_columns: dimension mismatch.");
   }
-  MatrixXd out(rows(), coeffs.cols());
-  out.noalias() = values_.leftCols(static_cast<int>(active_cols)) * coeffs;
-  return out;
+  auto* cpu_result = dynamic_cast<CpuMultiVector*>(&result);
+  if (!cpu_result) {
+    throw std::invalid_argument(
+        "CpuMultiVector::right_multiply_active_columns: result is not a CpuMultiVector.");
+  }
+  cpu_result->values_.noalias() =
+      values_.leftCols(static_cast<int>(active_cols)) * coeffs;
 }
 
 }  // namespace core

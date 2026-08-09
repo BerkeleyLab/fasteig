@@ -2,18 +2,25 @@
 
 #include "core/Executor.hpp"
 #include "core/KrylovSubspace.hpp"
+#include "core/LanczosWorkspace.hpp"
 #include "core/LinearOperator.hpp"
 #include "core/MultiVector.hpp"
+#include "core/RitzExtraction.hpp"
 #include "core/Vector.hpp"
-#include "fasteig_problem.hpp"
 #include "fasteig_logger.hpp"
+#include "fasteig_problem.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <limits>
 #include <memory>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace fasteig {
-
 namespace {
 
 double b_norm(const operations& opsB, const VectorXd& v, VectorXd& Bv) {
@@ -26,10 +33,8 @@ double b_norm(const operations& opsB, const VectorXd& v, VectorXd& Bv) {
   return std::sqrt(vv);
 }
 
-// Generalized (A,B) Lanczos-style expansion for B-inner product.
-// Builds a B-orthonormal basis Q (Q^T B Q = I) and the projected matrix H = Q^T A Q.
-//
-// Uses operator application y = B^{-1} (A v) via opsB.solve.
+// Legacy host-only expansion for generalized A*x=lambda*B*x problems. The
+// standard problem uses the executor-aware core::KrylovSubspace path below.
 void KrylovSubspaceGeneralized(VectorXd& f,
                                MatrixXd& Q,
                                MatrixXd& H,
@@ -46,24 +51,20 @@ void KrylovSubspaceGeneralized(VectorXd& f,
   if (!opsB.matvec) throw std::runtime_error("KrylovSubspaceGeneralized: opsB.matvec is not set");
   if (!opsB.solve) throw std::runtime_error("KrylovSubspaceGeneralized: opsB.solve is not set");
 
-  double beta = 0.0;
   VectorXd v(n), Av(n), y(n), Bf(n);
-
   for (size_t i = begin; i < end; ++i) {
-    beta = b_norm(opsB, f, Bf);
-
-    // Handle breakdown: if f is (near) zero in B-norm, restart with a random vector.
+    double beta = b_norm(opsB, f, Bf);
     if (beta <= std::numeric_limits<double>::epsilon()) {
       f = VectorXd::Random(static_cast<int>(n));
       if (i > 0) {
-        // f -= Q*(Q^T B f) using cached BQ
         opsB.matvec(f, Bf);
         VectorXd s = BQ.leftCols(static_cast<int>(i)).transpose() * f;
         f.noalias() -= Q.leftCols(static_cast<int>(i)) * s;
       }
       beta = b_norm(opsB, f, Bf);
       if (beta <= std::numeric_limits<double>::epsilon()) {
-        throw std::runtime_error("KrylovSubspaceGeneralized: breakdown, unable to generate new basis vector");
+        throw std::runtime_error(
+            "KrylovSubspaceGeneralized: breakdown, unable to generate new basis vector");
       }
     }
 
@@ -71,26 +72,21 @@ void KrylovSubspaceGeneralized(VectorXd& f,
     Q.col(static_cast<int>(i)) = v;
     BQ.col(static_cast<int>(i)).noalias() = Bf / beta;
 
-    // Similar to KrylovSubspace(): fill the off-diagonal coupling coefficient.
     if (i != begin || (begin != 0 && end - begin == 1)) {
       H(static_cast<int>(i), static_cast<int>(i - 1)) = beta;
       H(static_cast<int>(i - 1), static_cast<int>(i)) = beta;
     }
 
-    // Apply A then solve with B: y = B^{-1} (A v).
     opsA.matvec(v, Av);
     opsB.solve(Av, y);
 
-    // Projected coefficients h_j = q_j^T A v = q_j^T B y.
     VectorXd h = Q.leftCols(static_cast<int>(i + 1)).transpose() * Av;
     f.noalias() = y - Q.leftCols(static_cast<int>(i + 1)) * h;
 
-    // Re-orthogonalize in the B-inner product: s = Q^T B f = (BQ^T) f.
     VectorXd s = BQ.leftCols(static_cast<int>(i + 1)).transpose() * f;
     h.noalias() += s;
     f.noalias() -= Q.leftCols(static_cast<int>(i + 1)) * s;
 
-    // Second pass for stability.
     s = BQ.leftCols(static_cast<int>(i + 1)).transpose() * f;
     h.noalias() += s;
     f.noalias() -= Q.leftCols(static_cast<int>(i + 1)) * s;
@@ -106,270 +102,237 @@ KrylovSchurSolver::KrylovSchurSolver(::fasteig_problem& problem,
     : fasteig_solver(problem, options) {}
 
 FASTEIG_INT KrylovSchurSolver::solve() {
+  if (problem_.is_generalized()) {
+    return solve_generalized_host();
+  }
+
   const FASTEIG_INT n = eigvecs_.rows();
   const FASTEIG_INT nev = options_.nev();
   const FASTEIG_INT maxiter = options_.maxiter();
-  const std::string which = options_.which();
   const FASTEIG_DOUBLE shift = options_.shift();
   const FASTEIG_DOUBLE tol = options_.tol();
   const int verbosity = options_.verbosity();
   const FASTEIG_INT print_every = options_.print_every();
+  const std::string which = core::lanczos_lower_copy(options_.which());
 
-  const size_t n_sz = static_cast<size_t>(n);
-
-  if (nev == 0) {
-    throw std::runtime_error("Desired number of eigenpairs should be larger than 0");
+  if (n <= 0) throw std::invalid_argument("KrylovSchurSolver: n must be > 0.");
+  if (nev <= 0 || nev > n) {
+    throw std::invalid_argument("KrylovSchurSolver: nev must be in [1,n].");
   }
-  if (static_cast<size_t>(nev) > n_sz) {
-    throw std::runtime_error("Desired number of eigenpairs should be smaller than the size of the matrix");
+  if (maxiter <= 0) {
+    throw std::invalid_argument("KrylovSchurSolver: maxiter must be > 0.");
   }
+  core::validate_lanczos_which(which, /*allow_sai=*/true, "KrylovSchurSolver");
 
-  const size_t upp = 20;
-  const size_t k = std::min(std::max(2 * static_cast<size_t>(nev), upp), n_sz);
-  const size_t nev0 = static_cast<size_t>(nev);
+  constexpr FASTEIG_INT kMinimumSubspace = 20;
+  const FASTEIG_INT subspace_dim =
+      std::min(std::max<FASTEIG_INT>(2 * nev, kMinimumSubspace), n);
 
-  std::vector<size_t> Ind(k, 0);
-
-  if (which != "SR" && which != "sr" &&
-      which != "LR" && which != "lr" &&
-      which != "BE" && which != "be" &&
-      which != "LM" && which != "lm" &&
-      which != "SM" && which != "sm" &&
-      which != "SAI" && which != "sai") {
-    throw std::invalid_argument(
-        "Invalid which option. Use 'sr' for smallest, 'lr' for largest, 'be' for both ends, "
-        "'lm' for largest (magnitude), or 'sm' for smallest (magnitude) eigenpairs.");
-  }
-
-  std::string which_lower = which;
-  std::transform(which_lower.begin(), which_lower.end(), which_lower.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
-  std::ostream* log = (print_every > 0) ? problem_.log_stream() : nullptr;
   fasteig_logger stdout_logger;
   if (verbosity >= 2) stdout_logger.attach(&std::cout);
+  fasteig_logger* log_logger =
+      (print_every > 0 && problem_.log_stream()) ? &problem_.logger() : nullptr;
+  fasteig_logger* console_logger = (verbosity >= 2) ? &stdout_logger : nullptr;
 
-  MatrixXd Q(n_sz, static_cast<int>(k));
-  MatrixXd H(static_cast<int>(k), static_cast<int>(k));
-  MatrixXd BQ;  // only used for generalized problems
+  // All large vectors and the projected matrix are owned by the selected
+  // executor. CPU and CUDA use the same Krylov-Schur algorithm below.
+  std::shared_ptr<core::Executor> exec = problem_.executor(options_);
+  std::unique_ptr<core::LinearOperator> op = problem_.make_linear_operator(options_, *exec);
+  const unsigned int base_seed = options_.seed().value_or(1u);
+  auto residual = (options_.v0().size() > 0)
+                      ? exec->create_vector(options_.v0().col(0))
+                      : exec->create_random_vector(n, base_seed);
+  auto operator_result = exec->create_vector(n);
+  auto basis = exec->create_multivector(n, subspace_dim);
+  auto projection =
+      core::make_lanczos_workspace(*exec, n, subspace_dim, subspace_dim);
+  core::KrylovSubspace subspace(
+      *op, *residual, *operator_result, *basis, base_seed);
 
-  Q.setZero();
-  H.setZero();
+  auto expand_subspace = [&](FASTEIG_INT begin) {
+    for (FASTEIG_INT col = begin; col < subspace_dim; ++col) {
+      const double beta = subspace.normalize_residual_into_basis(col);
+      subspace.apply_operator_to_basis_column(col);
+      const double alpha = subspace.orthogonalize_operator_result(col + 1);
+      const double beta_next = subspace.residual_norm();
+      projection->record_step(col, beta, alpha, beta_next);
+    }
+  };
 
-  FASTEIG_DOUBLE beta;
+  expand_subspace(0);
+
+  for (FASTEIG_INT iter = 1; iter <= maxiter; ++iter) {
+    // Diagonalize the projected matrix and order all Ritz pairs according to
+    // `which`. CUDA uses the existing cuSOLVER workspace implementation.
+    core::LanczosSnapshot full = projection->compute_snapshot(
+        subspace_dim, subspace_dim, which, /*need_vectors=*/true,
+        "KrylovSchurSolver");
+    const VectorXd abs_residuals = core::lanczos_absolute_residuals(full);
+
+    FASTEIG_INT nconv = 0;
+    for (FASTEIG_INT j = 0; j < nev; ++j) {
+      if (abs_residuals(static_cast<int>(j)) <
+          tol * std::abs(full.lam(static_cast<int>(j)))) {
+        ++nconv;
+      }
+    }
+
+    const bool do_progress =
+        (print_every > 0) && ((iter % print_every) == 0);
+    const core::LanczosSnapshot report = core::krylov_schur_progress_snapshot(
+        full, nev, which, shift, "KrylovSchurSolver");
+    if (do_progress) {
+      core::lanczos_emit_snapshot(report, iter, log_logger, console_logger);
+    }
+
+    const bool finished =
+        (subspace_dim == nev) || (nconv >= nev) || (iter == maxiter);
+    if (finished) {
+      core::LanczosSnapshot final = core::lanczos_snapshot_head(
+          full, nev, "KrylovSchurSolver");
+      if (!do_progress && print_every > 0) {
+        core::lanczos_emit_snapshot(report, iter, log_logger, console_logger);
+      }
+      projection->finalize_eigenpairs(*op, *basis, subspace_dim, final,
+                                      which, shift, eigvals_, eigvecs_, resnrms_);
+      if (which == "sai") compute_final_residual_norms();
+      set_iterations(static_cast<long long>(iter));
+      return status_;
+    }
+
+    // Retain the wanted Ritz vectors, seed the dense restart coupling row,
+    // then expand the compacted basis back to the target subspace dimension.
+    const FASTEIG_INT spare = (subspace_dim - nev) / 2;
+    FASTEIG_INT retained = nev + std::min(nconv, spare);
+    if (retained == 1 && subspace_dim > 3) retained = subspace_dim / 2;
+
+    subspace.rotate_basis(
+        subspace_dim, full.Csel.leftCols(static_cast<int>(retained)));
+    projection->prepare_krylov_schur_restart(
+        retained, full, "KrylovSchurSolver");
+    expand_subspace(retained);
+  }
+
+  throw std::logic_error("KrylovSchurSolver: unreachable solve termination.");
+}
+
+FASTEIG_INT KrylovSchurSolver::solve_generalized_host() {
+  const FASTEIG_INT n = eigvecs_.rows();
+  const FASTEIG_INT nev = options_.nev();
+  const FASTEIG_INT maxiter = options_.maxiter();
+  const FASTEIG_DOUBLE tol = options_.tol();
+  const int verbosity = options_.verbosity();
+  const FASTEIG_INT print_every = options_.print_every();
+  const std::string which = core::lanczos_lower_copy(options_.which());
+
+  if (n <= 0 || nev <= 0 || nev > n || maxiter <= 0) {
+    throw std::invalid_argument("KrylovSchurSolver: invalid generalized problem dimensions/options.");
+  }
+  core::validate_lanczos_which(which, /*allow_sai=*/false, "KrylovSchurSolver");
+
+  constexpr FASTEIG_INT kMinimumSubspace = 20;
+  const FASTEIG_INT k =
+      std::min(std::max<FASTEIG_INT>(2 * nev, kMinimumSubspace), n);
+
+  fasteig_logger stdout_logger;
+  if (verbosity >= 2) stdout_logger.attach(&std::cout);
+  fasteig_logger* log_logger =
+      (print_every > 0 && problem_.log_stream()) ? &problem_.logger() : nullptr;
+  fasteig_logger* console_logger = (verbosity >= 2) ? &stdout_logger : nullptr;
+
+  MatrixXd Q = MatrixXd::Zero(n, k);
+  MatrixXd H = MatrixXd::Zero(k, k);
+  MatrixXd BQ = MatrixXd::Zero(n, k);
   VectorXd f;
   if (options_.v0().size() > 0) {
     f = options_.v0().col(0);
   } else {
     f = VectorXd::Random(n);
   }
-  FASTEIG_SIZET sai = 0;
 
-  const bool generalized = (problem_.bmatrix() != nullptr);
-  if (generalized && (which_lower == "sai")) {
-    throw std::invalid_argument("KrylovSchur: generalized eigenproblems do not support which=SAI.");
-  }
+  KrylovSubspaceGeneralized(f, Q, H, BQ, opsA_, opsB_, 0,
+                            static_cast<size_t>(k));
 
-  std::shared_ptr<core::Executor> exec;
-  std::unique_ptr<core::LinearOperator> op;
-  std::unique_ptr<core::Vector> residual;
-  std::unique_ptr<core::Vector> operator_result;
-  std::unique_ptr<core::MultiVector> basis;
-  const unsigned int base_seed = options_.seed().value_or(1u);
+  for (FASTEIG_INT iter = 1; iter <= maxiter; ++iter) {
+    Eigen::SelfAdjointEigenSolver<MatrixXd> solver(H.topLeftCorner(k, k));
+    const VectorXd D = solver.eigenvalues();
+    const MatrixXd C = solver.eigenvectors();
 
-  auto build_standard_krylov = [&](size_t begin, size_t end) {
-    if (!exec) {
-      exec = problem_.executor(options_);
-      op = problem_.make_linear_operator(options_, *exec);
-      residual = exec->create_vector(f);
-      operator_result = exec->create_vector(n);
-      basis = exec->create_multivector(n, static_cast<FASTEIG_INT>(k));
-    } else {
-      residual->copy_from_host(f);
+    VectorXd Bf(n);
+    const double beta = b_norm(opsB_, f, Bf);
+    VectorXd brow = beta * C.row(k - 1).transpose();
+    const std::vector<size_t> indices = core::lanczos_select_ritz_indices(D, which);
+
+    VectorXd values(nev);
+    VectorXd residuals(nev);
+    FASTEIG_INT nconv = 0;
+    for (FASTEIG_INT j = 0; j < nev; ++j) {
+      const int idx = static_cast<int>(indices[static_cast<size_t>(j)]);
+      values(static_cast<int>(j)) = D(idx);
+      residuals(static_cast<int>(j)) = std::abs(brow(idx));
+      if (residuals(static_cast<int>(j)) < tol * std::abs(D(idx))) ++nconv;
     }
 
-    basis->copy_from_host(Q);
-    core::KrylovSubspace krylov(*op, *residual, *operator_result, *basis, H, base_seed);
-    krylov.build(static_cast<FASTEIG_INT>(begin), static_cast<FASTEIG_INT>(end));
-    f = residual->copy_to_host();
-    Q = basis->copy_to_host();
-  };
-
-  if (which_lower == "sai") {
-    build_standard_krylov(0, k);
-    sai = 1;
-  } else if (!generalized) {
-    build_standard_krylov(0, k);
-  } else {
-    BQ.resize(static_cast<int>(n_sz), static_cast<int>(k));
-    BQ.setZero();
-    KrylovSubspaceGeneralized(f, Q, H, BQ, opsA_, opsB_, 0, k);
-  }
-
-  // Parameters currently unused by this solver class interface (kept for algorithm parity).
-  
-
-  long long iter_done = 0;
-  for (size_t i = 0; i < static_cast<size_t>(maxiter); ++i) {
-    iter_done = static_cast<long long>(i + 1);
-    Eigen::SelfAdjointEigenSolver<MatrixXd> solver(
-        H.block(0, 0, static_cast<int>(k), static_cast<int>(k)));
-    const auto D = solver.eigenvalues();
-    const auto C = solver.eigenvectors();
-
-    beta = f.norm();
-    if (generalized) {
-      VectorXd Bf(static_cast<int>(n_sz));
-      beta = b_norm(opsB_, f, Bf);
-    }
-
-    std::vector<FASTEIG_DOUBLE> brow(k);
-    for (size_t j = 0; j < k; ++j) {
-      brow[j] = beta * C(static_cast<int>(k - 1), static_cast<int>(j));
-    }
-
-    if (which_lower == "be") {
-      for (size_t j = 0; j < k / 2; ++j) {
-        Ind[2 * j] = k - 1 - j;
-        Ind[2 * j + 1] = j;
-      }
-    } else {
-      Ind = sort_indices(D, which_lower);
-    }
-
-    size_t nconv = 0;
-
-    VectorXd lam_iter(static_cast<int>(nev0));
-    VectorXd res_iter(static_cast<int>(nev0));
-    for (size_t j = 0; j < nev0; ++j) {
-      const auto resid = abs(brow[Ind[j]]);
-      const auto eval = (sai == 1) ? (shift + 1.0 / D(static_cast<int>(Ind[j])))
-                                   : D(static_cast<int>(Ind[j]));
-      lam_iter(static_cast<int>(j)) = eval;
-      res_iter(static_cast<int>(j)) = resid;
-      if (resid < tol * abs(D(static_cast<int>(Ind[j])))) {
-        ++nconv;
-      }
-    }
-
-    const bool do_progress = (print_every > 0) && (((i + 1) % static_cast<size_t>(print_every)) == 0);
+    const bool do_progress =
+        (print_every > 0) && ((iter % print_every) == 0);
     if (do_progress) {
-      if (log) {
-        problem_.logger().print_convergence_data(lam_iter, res_iter, static_cast<int>(i + 1));
-      }
-      if (verbosity >= 2) {
-        stdout_logger.print_convergence_data(lam_iter, res_iter, static_cast<int>(i + 1));
-      }
+      core::LanczosSnapshot report;
+      report.lam = values;
+      report.rel_res = residuals;
+      core::lanczos_emit_snapshot(report, iter, log_logger, console_logger);
     }
 
-    if (k == nev0) {
-      eigvals_ = lam_iter;
-      for (size_t j = 0; j < nev0; ++j) {
-        eigvecs_.col(static_cast<int>(j)).noalias() =
-            Q.block(0, 0, n_sz, static_cast<int>(k)) *
-            C.block(0, static_cast<int>(Ind[j]), static_cast<int>(k), 1);
+    if (k == nev || nconv >= nev || iter == maxiter) {
+      eigvals_ = values;
+      MatrixXd selected(k, nev);
+      for (FASTEIG_INT j = 0; j < nev; ++j) {
+        selected.col(static_cast<int>(j)) =
+            C.col(static_cast<int>(indices[static_cast<size_t>(j)]));
       }
-
-      if (print_every > 0 && !do_progress) {
-        if (log) {
-          problem_.logger().print_convergence_data(lam_iter, res_iter, static_cast<int>(i + 1));
-        }
-        if (verbosity >= 2) {
-          stdout_logger.print_convergence_data(lam_iter, res_iter, static_cast<int>(i + 1));
-        }
+      eigvecs_.noalias() = Q.leftCols(k) * selected;
+      if (!do_progress && print_every > 0) {
+        core::LanczosSnapshot report;
+        report.lam = values;
+        report.rel_res = residuals;
+        core::lanczos_emit_snapshot(report, iter, log_logger, console_logger);
       }
       compute_final_residual_norms();
-      set_iterations(iter_done);
+      set_iterations(static_cast<long long>(iter));
       return status_;
     }
 
-    const size_t temp = static_cast<size_t>(std::floor((k - nev0) / 2));
-    size_t current_nev = nev0 + std::min(nconv, temp);
-    if (current_nev == 1 && k > 3) {
-      current_nev = static_cast<size_t>(std::floor(k / 2.0));
-    }
+    const FASTEIG_INT spare = (k - nev) / 2;
+    FASTEIG_INT retained = nev + std::min(nconv, spare);
+    if (retained == 1 && k > 3) retained = k / 2;
 
-    MatrixXd C_TEMP(static_cast<int>(k), static_cast<int>(current_nev));
-    for (size_t j = 0; j < current_nev; ++j) {
-      C_TEMP.block(0, static_cast<int>(j), static_cast<int>(k), 1) =
-          C.block(0, static_cast<int>(Ind[j]), static_cast<int>(k), 1);
+    MatrixXd selected(k, retained);
+    for (FASTEIG_INT j = 0; j < retained; ++j) {
+      selected.col(static_cast<int>(j)) =
+          C.col(static_cast<int>(indices[static_cast<size_t>(j)]));
     }
-
-    Q.block(0, 0, n_sz, static_cast<int>(current_nev)) =
-        Q.block(0, 0, n_sz, static_cast<int>(k)) * C_TEMP;
+    MatrixXd rotated_basis = Q.leftCols(k) * selected;
+    Q.leftCols(retained) = std::move(rotated_basis);
 
     H.setZero();
-
-    for (size_t j = 0; j < current_nev; ++j) {
-      H(static_cast<int>(j), static_cast<int>(j)) = D(static_cast<int>(Ind[j]));
-      H(static_cast<int>(current_nev), static_cast<int>(j)) = brow[Ind[j]];
-      H(static_cast<int>(j), static_cast<int>(current_nev)) = brow[Ind[j]];
+    for (FASTEIG_INT j = 0; j < retained; ++j) {
+      const int idx = static_cast<int>(indices[static_cast<size_t>(j)]);
+      H(static_cast<int>(j), static_cast<int>(j)) = D(idx);
+      H(static_cast<int>(retained), static_cast<int>(j)) = brow(idx);
+      H(static_cast<int>(j), static_cast<int>(retained)) = brow(idx);
     }
 
-    if (nconv >= nev0 || i == static_cast<size_t>(maxiter) - 1) {
-
-      for (size_t j = 0; j < nev0; ++j) {
-        eigvals_(static_cast<int>(j)) = (sai == 1)
-                                            ? (shift + 1.0 / H(static_cast<int>(j), static_cast<int>(j)))
-                                            : H(static_cast<int>(j), static_cast<int>(j));
-      }
-      eigvecs_ = Q.block(0, 0, n_sz, static_cast<int>(nev0));
-
-      std::iota(Ind.begin(), Ind.end(), 0); // natural ordering for Ritz values
-
-      if (sai == 1) {
-
-        VectorXd residual(n_sz);
-
-        for (size_t j = 0; j < nev0; ++j) {
-          opsA_.matvec(eigvecs_.col(static_cast<int>(j)), residual);
-          residual -= eigvals_(static_cast<int>(j)) * eigvecs_.col(static_cast<int>(j));
-          res_iter(static_cast<int>(j)) = residual.norm();
-        }
-        Ind = sort_indices(eigvals_, "sr"); // resort the transformed Ritz values for reporting convergence
-      }
-
-      VectorXd lam_final(static_cast<int>(nev0));
-      VectorXd res_final(static_cast<int>(nev0));
-
-      for (size_t j = 0; j < nev0; ++j) {
-          lam_final(static_cast<int>(j)) = eigvals_(static_cast<int>(Ind[j]));
-          res_final(static_cast<int>(j)) = res_iter(static_cast<int>(Ind[j]));
-      }
-      if (print_every > 0 && !do_progress) {
-        if (log) {
-          problem_.logger().print_convergence_data(lam_final, res_final, static_cast<int>(i + 1));
-        }
-        if (verbosity >= 2) {
-          stdout_logger.print_convergence_data(lam_final, res_final, static_cast<int>(i + 1));
-        }
-      }
-      for (size_t j = 0; j < nev0; ++j) {
-          eigvals_(static_cast<int>(j)) = lam_final(static_cast<int>(j));
-          eigvecs_.col(static_cast<int>(j)) = Q.block(0, 0, n_sz, static_cast<int>(nev0)).col(static_cast<int>(Ind[j]));
-      }
-      compute_final_residual_norms();
-      set_iterations(iter_done);
-      return status_;
+    MatrixXd BQtmp(n, retained);
+    if (!opsB_.block_matvec) {
+      throw std::runtime_error("KrylovSchurSolver: generalized requires opsB.block_matvec.");
     }
-
-    if (which_lower == "sai") {
-      build_standard_krylov(current_nev, k);
-    } else if (!generalized) {
-      build_standard_krylov(current_nev, k);
-    } else {
-      // Update cached BQ for the restarted basis before expansion.
-      if (!opsB_.block_matvec) {
-        throw std::runtime_error("KrylovSchur: generalized requires opsB.block_matvec.");
-      }
-      MatrixXd BQtmp(static_cast<int>(n_sz), static_cast<int>(current_nev));
-      opsB_.block_matvec(Q.leftCols(static_cast<int>(current_nev)), BQtmp);
-      BQ.leftCols(static_cast<int>(current_nev)) = std::move(BQtmp);
-      KrylovSubspaceGeneralized(f, Q, H, BQ, opsA_, opsB_, current_nev, k);
-    }
+    opsB_.block_matvec(Q.leftCols(retained), BQtmp);
+    BQ.leftCols(retained) = BQtmp;
+    KrylovSubspaceGeneralized(f, Q, H, BQ, opsA_, opsB_,
+                              static_cast<size_t>(retained),
+                              static_cast<size_t>(k));
   }
-  set_iterations(iter_done);
-  return status_;
+
+  throw std::logic_error("KrylovSchurSolver: unreachable generalized solve termination.");
 }
 
 }  // namespace fasteig

@@ -98,9 +98,12 @@ void CudaLanczosWorkspace::record_step(FASTEIG_INT it,
   }
 
   auto& context = cuda_executor_from(exec_, "CudaLanczosWorkspace::record_step").context();
+  const bool record_beta = (it != restart_coupling_row_);
   gpu::launch_set_lanczos_projected_matrix_entry(
-      d_T_, static_cast<int>(maxiter_), static_cast<int>(it), beta, alpha, context.stream());
+      d_T_, static_cast<int>(maxiter_), static_cast<int>(it), beta, alpha,
+      record_beta, context.stream());
   beta_next_ = beta_next;
+  if (it == restart_coupling_row_) restart_coupling_row_ = -1;
 }
 
 void CudaLanczosWorkspace::record_block_step(FASTEIG_INT block_index,
@@ -264,6 +267,27 @@ LanczosSnapshot CudaLanczosWorkspace::compute_block_snapshot(FASTEIG_INT block_c
   }
   return block_lanczos_make_snapshot_from_eigenvalues_last_block(
       D, last_block, block_size, nev, beta_block_, which, solver_name);
+}
+
+void CudaLanczosWorkspace::prepare_krylov_schur_restart(
+    FASTEIG_INT retained_cols,
+    const LanczosSnapshot& snapshot,
+    const char* solver_name) {
+  if (retained_cols >= maxiter_) {
+    throw std::invalid_argument(std::string(solver_name) +
+                                ": retained subspace leaves no room for expansion.");
+  }
+
+  MatrixXd restart = krylov_schur_restart_projection(
+      snapshot, retained_cols, beta_next_, solver_name);
+  auto& context =
+      cuda_executor_from(exec_, "CudaLanczosWorkspace::prepare_krylov_schur_restart").context();
+  const std::size_t matrix_size = static_cast<std::size_t>(maxiter_) *
+                                  static_cast<std::size_t>(maxiter_);
+  FASTEIG_CUDA_CHECK(cudaMemsetAsync(d_T_, 0, matrix_size * sizeof(double), context.stream()));
+  copy_host_block_to_device(d_T_, maxiter_, 0, 0, restart, context.stream());
+  FASTEIG_CUDA_CHECK(cudaStreamSynchronize(context.stream()));
+  restart_coupling_row_ = retained_cols;
 }
 
 void CudaLanczosWorkspace::finalize_eigenpairs(const LinearOperator& op,

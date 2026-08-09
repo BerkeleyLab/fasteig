@@ -23,6 +23,10 @@ public:
   MatrixXd copy_to_host() const override;
 
   void copy_from(const MultiVector& src) override;
+  void copy_columns_from(FASTEIG_INT dst_first_col,
+                         const MultiVector& src,
+                         FASTEIG_INT src_first_col,
+                         FASTEIG_INT column_count) override;
   void set_zero() override;
   void scale(double alpha) override;
   void copy_column_from(FASTEIG_INT col, const Vector& src) override;
@@ -38,6 +42,10 @@ public:
                                     std::vector<double>& coeffs) const override;
   MatrixXd multiply_active_columns(FASTEIG_INT active_cols,
                                    const Eigen::Ref<const MatrixXd>& coeffs) const override;
+  void right_multiply_active_columns(
+      FASTEIG_INT active_cols,
+      const Eigen::Ref<const MatrixXd>& coeffs,
+      MultiVector& result) const override;
 
   void orthogonalize_active_columns_device_coeffs(FASTEIG_INT active_cols,
                                                   const Vector& source,

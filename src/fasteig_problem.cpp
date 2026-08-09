@@ -202,6 +202,10 @@ void fasteig_problem::prepare(const fasteig_options& opts) {
   }
 
   if (!B_) return;
+  if (opts.gpu_backend()) {
+    throw std::invalid_argument(
+        "prepare(): generalized eigenproblems are currently host-only.");
+  }
   if (b_factorized_) return;
 
   if (solver_name.rfind("KrylovSchur", 0) != 0) {

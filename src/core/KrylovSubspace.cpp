@@ -157,6 +157,23 @@ double KrylovSubspace::residual_norm() const {
   return beta_next;
 }
 
+void KrylovSubspace::rotate_basis(
+    FASTEIG_INT active_cols,
+    const Eigen::Ref<const MatrixXd>& coefficients) {
+  if (active_cols <= 0 || active_cols > basis_.cols()) {
+    throw std::invalid_argument("core::KrylovSubspace::rotate_basis: invalid active column count.");
+  }
+  if (coefficients.rows() != static_cast<int>(active_cols) ||
+      coefficients.cols() <= 0 || coefficients.cols() > basis_.cols()) {
+    throw std::invalid_argument("core::KrylovSubspace::rotate_basis: coefficient dimension mismatch.");
+  }
+
+  const FASTEIG_INT retained_cols = static_cast<FASTEIG_INT>(coefficients.cols());
+  auto rotated = basis_.executor().create_multivector(basis_.rows(), retained_cols);
+  basis_.right_multiply_active_columns(active_cols, coefficients, *rotated);
+  basis_.copy_columns_from(0, *rotated, 0, retained_cols);
+}
+
 void KrylovSubspace::record_step(FASTEIG_INT it,
                                  FASTEIG_INT begin,
                                  FASTEIG_INT end,

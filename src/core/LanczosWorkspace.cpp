@@ -30,12 +30,13 @@ void CpuLanczosWorkspace::record_step(FASTEIG_INT it,
     throw std::invalid_argument("CpuLanczosWorkspace::record_step: iteration out of range.");
   }
 
-  if (it != 0) {
+  if (it != 0 && it != restart_coupling_row_) {
     T_(static_cast<int>(it), static_cast<int>(it - 1)) = beta;
     T_(static_cast<int>(it - 1), static_cast<int>(it)) = beta;
   }
   T_(static_cast<int>(it), static_cast<int>(it)) = alpha;
   beta_next_ = beta_next;
+  if (it == restart_coupling_row_) restart_coupling_row_ = -1;
 }
 
 void CpuLanczosWorkspace::record_block_step(FASTEIG_INT block_index,
@@ -87,6 +88,21 @@ LanczosSnapshot CpuLanczosWorkspace::compute_block_snapshot(FASTEIG_INT block_co
                                                             const char* solver_name) {
   return block_lanczos_compute_cpu_snapshot(T_, block_count, block_size, nev, beta_block_,
                                             which, need_vectors, solver_name);
+}
+
+void CpuLanczosWorkspace::prepare_krylov_schur_restart(
+    FASTEIG_INT retained_cols,
+    const LanczosSnapshot& snapshot,
+    const char* solver_name) {
+  if (retained_cols >= T_.rows()) {
+    throw std::invalid_argument(std::string(solver_name) +
+                                ": retained subspace leaves no room for expansion.");
+  }
+  MatrixXd restart = krylov_schur_restart_projection(
+      snapshot, retained_cols, beta_next_, solver_name);
+  T_.setZero();
+  T_.topLeftCorner(restart.rows(), restart.cols()) = restart;
+  restart_coupling_row_ = retained_cols;
 }
 
 void CpuLanczosWorkspace::finalize_eigenpairs(const LinearOperator& op,

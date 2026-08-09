@@ -1,20 +1,26 @@
 #include "gpu/CudaLanczosKernels.hpp"
+
 #ifdef USE_CUDA
+
 #include "gpu/CudaCheck.hpp"
+
 namespace fasteig {
 namespace gpu {
 namespace {
+
 __global__ void set_lanczos_projected_matrix_entry_kernel(double* T,
                                                           int ld,
                                                           int it,
                                                           double beta,
-                                                          double alpha) {
+                                                          double alpha,
+                                                          bool record_beta) {
   T[it + it * ld] = alpha;
-  if (it != 0) {
+  if (record_beta && it != 0) {
     T[it + (it - 1) * ld] = beta;
     T[(it - 1) + it * ld] = beta;
   }
 }
+
 __global__ void set_lanczos_projected_matrix_entry_from_device_kernel(double* T,
                                                                       int ld,
                                                                       int it,
@@ -26,6 +32,7 @@ __global__ void set_lanczos_projected_matrix_entry_from_device_kernel(double* T,
     T[(it - 1) + it * ld] = *beta;
   }
 }
+
 __global__ void normalize_column_from_device_norm_kernel(const double* x,
                                                          const double* norm,
                                                          double* y,
@@ -35,16 +42,21 @@ __global__ void normalize_column_from_device_norm_kernel(const double* x,
     y[idx] = x[idx] / (*norm);
   }
 }
+
 }  // namespace
+
 void launch_set_lanczos_projected_matrix_entry(double* d_T,
                                                int ld,
                                                int it,
                                                double beta,
                                                double alpha,
+                                               bool record_beta,
                                                cudaStream_t stream) {
-  set_lanczos_projected_matrix_entry_kernel<<<1, 1, 0, stream>>>(d_T, ld, it, beta, alpha);
+  set_lanczos_projected_matrix_entry_kernel<<<1, 1, 0, stream>>>(
+      d_T, ld, it, beta, alpha, record_beta);
   FASTEIG_CUDA_CHECK(cudaGetLastError());
 }
+
 void launch_set_lanczos_projected_matrix_entry_from_device(double* d_T,
                                                            int ld,
                                                            int it,
@@ -55,6 +67,7 @@ void launch_set_lanczos_projected_matrix_entry_from_device(double* d_T,
       d_T, ld, it, d_beta, d_alpha);
   FASTEIG_CUDA_CHECK(cudaGetLastError());
 }
+
 void launch_normalize_column_from_device_norm(const double* d_x,
                                               const double* d_norm,
                                               double* d_y,
@@ -65,7 +78,9 @@ void launch_normalize_column_from_device_norm(const double* d_x,
   normalize_column_from_device_norm_kernel<<<grid, block, 0, stream>>>(d_x, d_norm, d_y, n);
   FASTEIG_CUDA_CHECK(cudaGetLastError());
 }
+
 }  // namespace gpu
 }  // namespace fasteig
+
 #endif  // USE_CUDA
 

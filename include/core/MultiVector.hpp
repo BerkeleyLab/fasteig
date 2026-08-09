@@ -21,6 +21,10 @@ public:
   virtual MatrixXd copy_to_host() const = 0;
 
   virtual void copy_from(const MultiVector& src) = 0;
+  virtual void copy_columns_from(FASTEIG_INT dst_first_col,
+                                 const MultiVector& src,
+                                 FASTEIG_INT src_first_col,
+                                 FASTEIG_INT column_count) = 0;
   virtual void set_zero() = 0;
   virtual void scale(double alpha) = 0;
   virtual void copy_column_from(FASTEIG_INT col, const Vector& src) = 0;
@@ -36,6 +40,10 @@ public:
                                             std::vector<double>& coeffs) const = 0;
   virtual MatrixXd multiply_active_columns(FASTEIG_INT active_cols,
                                            const Eigen::Ref<const MatrixXd>& coeffs) const = 0;
+  virtual void right_multiply_active_columns(
+      FASTEIG_INT active_cols,
+      const Eigen::Ref<const MatrixXd>& coeffs,
+      MultiVector& result) const = 0;
 };
 
 class CpuMultiVector final : public MultiVector {
@@ -54,6 +62,10 @@ public:
   MatrixXd copy_to_host() const override { return values_; }
 
   void copy_from(const MultiVector& src) override;
+  void copy_columns_from(FASTEIG_INT dst_first_col,
+                         const MultiVector& src,
+                         FASTEIG_INT src_first_col,
+                         FASTEIG_INT column_count) override;
   void set_zero() override { values_.setZero(); }
   void scale(double alpha) override { values_ *= alpha; }
   void copy_column_from(FASTEIG_INT col, const Vector& src) override;
@@ -69,6 +81,10 @@ public:
                                     std::vector<double>& coeffs) const override;
   MatrixXd multiply_active_columns(FASTEIG_INT active_cols,
                                    const Eigen::Ref<const MatrixXd>& coeffs) const override;
+  void right_multiply_active_columns(
+      FASTEIG_INT active_cols,
+      const Eigen::Ref<const MatrixXd>& coeffs,
+      MultiVector& result) const override;
 
   MatrixXd& values() noexcept { return values_; }
   const MatrixXd& values() const noexcept { return values_; }
