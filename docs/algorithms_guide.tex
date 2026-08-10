@@ -1,0 +1,1009 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=0.9in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  urlcolor=blue!65!black,
+  citecolor=blue!55!black,
+  pdftitle={FASTEIG Algorithms Guide},
+  pdfauthor={FASTEIG project}
+}
+
+\lstdefinestyle{pseudocode}{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{black!3},
+  frame=single,
+  framerule=0.3pt,
+  columns=fullflexible,
+  keepspaces=true,
+  breaklines=true,
+  showstringspaces=false,
+  xleftmargin=0.5em,
+  xrightmargin=0.5em
+}
+\lstset{style=pseudocode}
+
+\newcommand{\fasteig}{\textsc{fasteig}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\RR}{\mathbb{R}}
+\newcommand{\norm}[1]{\left\lVert #1\right\rVert_2}
+\newcommand{\Kspace}[2]{\mathcal{K}_{#1}\!\left(#2\right)}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\title{\fasteig{} Algorithms Guide}
+\author{Based on the FASTEIG source distribution}
+\date{Repository version 1.0.0\\Guide revised August 10, 2026}
+
+\begin{document}
+\setlength{\emergencystretch}{3em}
+\maketitle
+
+\begin{abstract}
+This guide describes the eigensolvers available in \fasteig{}, the numerical
+ideas behind them, their intended use, and the way each method is realized by
+the current CPU and CUDA executor architecture.  The descriptions and
+pseudocode are implementation-aware: they document the algorithms that the
+repository runs today, including important limitations, rather than only their
+ideal textbook forms.  Build, input, and command-line instructions remain in
+the separate \fasteig{} User's Guide.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Scope and notation}
+
+\fasteig{} targets a few eigenpairs of a large, sparse, real symmetric matrix.
+The standard problem is
+\begin{equation}
+  A x_i = \lambda_i x_i, \qquad A=A^T\in\RR^{n\times n},
+  \label{eq:standard}
+\end{equation}
+and the generalized problem is
+\begin{equation}
+  A x_i = \lambda_i Bx_i, \qquad A=A^T,\quad B=B^T\succ 0.
+  \label{eq:generalized}
+\end{equation}
+Only Krylov--Schur currently supports Equation~\eqref{eq:generalized}, and that
+path is host-only.  The other solvers discussed here operate on
+Equation~\eqref{eq:standard}.
+
+The following notation is used throughout:
+\begin{itemize}[leftmargin=*]
+  \item $p$ is the requested number of eigenpairs (the input option
+        \code{nev});
+  \item $m$ is the current scalar subspace dimension;
+  \item $b$ is a block width;
+  \item $Q_m=[q_1,\ldots,q_m]$ is an orthonormal basis;
+  \item $T_m=Q_m^TAQ_m$ is the projected matrix; and
+  \item $(\theta_j,y_j)$ is a Ritz pair, where $y_j=Q_m c_j$ and
+        $T_m c_j=\theta_j c_j$.
+\end{itemize}
+
+\subsection{Target-selection codes}
+
+The input option \code{which} describes how projected eigenvalues are ordered.
+The complete target set used by the Lanczos-family implementations is:
+
+\begin{center}
+\begin{tabular}{P{0.12\textwidth} P{0.33\textwidth} P{0.43\textwidth}}
+\toprule
+Code & Meaning & Practical interpretation \\
+\midrule
+\code{SR} & Smallest real/algebraic & The low end of the spectrum. \\
+\code{LR} & Largest real/algebraic & The high end of the spectrum. \\
+\code{SM} & Smallest magnitude & Values closest to zero; usually difficult without a transformation. \\
+\code{LM} & Largest magnitude & Values farthest from zero. \\
+\code{BE} & Both ends & Alternates selections from the high and low ends. \\
+\code{SAI} & Shift-and-invert & Values nearest the user-supplied \code{shift}. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Lanczos and standard Krylov--Schur implement all six codes.  Block Lanczos and
+Block Krylov--Schur implement \code{SR}, \code{LR}, \code{SM}, \code{LM}, and
+\code{BE}.  Davidson, LOBPCG, and Chebyshev are currently end-of-spectrum
+implementations: \code{LR} and \code{LM} are handled by applying the method to
+$-A$ and negating the reported eigenvalues; other non-high-end selections are
+treated as low-end computations rather than as general interior targeting.
+
+\subsection{Residuals and stopping tests}
+
+The final standard-problem residual printed by the driver is
+\begin{equation}
+  \rho_i =
+  \frac{\norm{Ay_i-\theta_i y_i}}
+       {(1+|\theta_i|)\norm{y_i}}.
+  \label{eq:standard-residual}
+\end{equation}
+For a generalized problem it is
+\begin{equation}
+  \rho_i^{(B)} =
+  \frac{\norm{Ay_i-\theta_i By_i}}
+       {(1+|\theta_i|)\norm{By_i}}.
+  \label{eq:generalized-residual}
+\end{equation}
+The extra $1$ keeps the scaling meaningful for eigenvalues near zero.
+
+Intermediate progress residuals can differ from the final check.  In the
+Lanczos family they are inexpensive estimates obtained from the coupling to the
+next basis vector.  Other solvers may use explicit residuals or their own
+historical normalization.  The final table is therefore the authoritative
+cross-solver accuracy check.
+
+\section{Choosing a solver}
+\label{sec:selection}
+
+Table~\ref{tab:solver-summary} summarizes the current implementation.  ``Native
+executor path'' means that the large basis vectors and core recurrence can
+remain in executor memory.  ``Hybrid'' means that the matrix application uses a
+\code{LinearOperator}, but substantial dense state is still stored and updated
+with host Eigen objects.
+
+\small
+\begin{longtable}{P{0.16\textwidth} P{0.25\textwidth} P{0.20\textwidth} P{0.29\textwidth}}
+\caption{Solver capabilities in the current repository.}
+\label{tab:solver-summary}\\
+\toprule
+Solver & Best use & Current execution model & Important limits \\
+\midrule
+\endfirsthead
+\toprule
+Solver & Best use & Current execution model & Important limits \\
+\midrule
+\endhead
+Lanczos & A few extremal eigenpairs; simple, dependable baseline; interior pairs with SAI. & Native CPU/CUDA executor path. & Unrestarted; basis storage grows as $O(nm)$. \\
+Block Lanczos & Clusters, multiple eigenvalues, or several pairs at once. & Native CPU/CUDA path for large basis state; small block coefficients are host-visible. & Unrestarted; no SAI or generalized problem. \\
+Krylov--Schur & Bounded-memory extremal solve; repeated restart cycles; SAI. & Standard problem has a native executor path. Generalized problem is host-only. & Standard subspace dimension is currently fixed internally; generalized SAI is unsupported. \\
+Block Krylov--Schur & Clustered eigenvalues with restarted block expansion. & Executor-aware but presently hybrid. & Block width is \code{nev}; no SAI or generalized problem. \\
+Davidson & Low or high extremal pairs when useful correction/preconditioning information is available. & Executor-aware matrix application; host dense state. & Current correction is the raw residual; no active preconditioner. \\
+LOBPCG & Several extremal pairs with a compact three-block trial space. & Executor-aware matrix application; host dense state. & Preconditioner hook is not active in the current solver. \\
+Chebyshev & Repeatedly improving an approximate low- or high-end invariant subspace. & Executor-aware matrix application; host filtering and dense state. & Filter degree and spectral bounds strongly affect behavior. \\
+SPPC & Hierarchical Hamiltonians with a useful leading principal problem. & Host-oriented through a legacy-operations adapter. & Specialized partition; requires \code{maxdim}=split size. \\
+RMM-DIIS & Refining already reasonable eigenvector estimates. & Host-oriented through a legacy-operations adapter. & Default correction solve is a placeholder; not a robust global eigensolver by itself. \\
+\bottomrule
+\end{longtable}
+\normalsize
+
+As a practical starting point:
+\begin{enumerate}[leftmargin=*]
+  \item Use Lanczos for a first correctness run and for CUDA SAI.
+  \item Use Krylov--Schur when the unrestarted Lanczos basis would be too large.
+  \item Use a block method for multiplicities or tightly clustered eigenvalues.
+  \item Use LOBPCG or Davidson when a meaningful preconditioner is available;
+        note that the current built-in implementations do not yet activate one.
+  \item Use Chebyshev when a good starting subspace is available or a sequence
+        of related eigenproblems is being solved.
+  \item Use SPPC only when the matrix has the hierarchical structure assumed by
+        that method, and use RMM-DIIS as a refinement stage.
+\end{enumerate}
+
+\section{Shared numerical building blocks}
+
+\subsection{Executor and linear-operator model}
+
+The solver-level algorithm is separated from storage and kernel choice by the
+\code{core::Executor} interface.  An executor creates \code{Vector},
+\code{MultiVector}, and \code{CsrMatrix} objects in the memory space associated
+with that executor.  A \code{LinearOperator} exposes
+\code{apply}, \code{apply\_column}, and \code{apply\_block}; the solver does not
+need to know whether the operation is an Eigen sparse product, a cuSPARSE
+kernel, or a sparse direct solve.
+
+For the CPU executor, an explicit matrix is reached through the existing
+\code{operations} interface and \code{LegacyOperationsOperator}.  For the CUDA
+executor, stored matrices become CUDA CSR operators and ordinary products use
+cuSPARSE.  CUDA vectors and multivectors use cuBLAS for vector and dense block
+operations.  Dense projected eigensolves in the CUDA Lanczos workspace use
+cuSOLVER.  CUDA SAI uses cuDSS.
+
+This design follows the same broad separation of concerns as executor-based
+libraries such as Ginkgo~\cite{ginkgo}: the executor chooses placement and
+backend behavior, while solver pseudocode is expressed in terms of abstract
+objects.  It does not imply that every solver is already fully device-resident;
+Table~\ref{tab:residency} records the present boundary.
+
+\small
+\begin{longtable}{P{0.22\textwidth} P{0.31\textwidth} P{0.37\textwidth}}
+\caption{Current data-residency boundary.}
+\label{tab:residency}\\
+\toprule
+Path & Executor-resident state & Host-resident or host-visible state \\
+\midrule
+\endfirsthead
+\toprule
+Path & Executor-resident state & Host-resident or host-visible state \\
+\midrule
+\endhead
+Lanczos & Basis, residual, operator result, projected workspace, Ritz-vector multiplication. & Final public Eigen vectors; scalar convergence data. \\
+Block Lanczos & Basis blocks, operator/residual blocks, projected workspace. & Small QR and projection blocks; final public Eigen vectors. \\
+Standard Krylov--Schur & Basis, recurrence vectors, projected workspace and standard restart operations. & Progress data and final public results. \\
+Generalized Krylov--Schur & None of the large Krylov state is executor-backed. & $Q$, $BQ$, projected matrix, and $B$ solves. \\
+Block Krylov--Schur & Operator application can use the executor. & Cycle basis, projected matrix, restart, and eigensolve. \\
+Davidson, LOBPCG, Chebyshev & Operator application can use the executor. & Dense trial spaces, orthogonalization, projection, filtering state. \\
+SPPC, RMM-DIIS & Operator is adapted to host callbacks. & Algorithm state and correction equations. \\
+\bottomrule
+\end{longtable}
+\normalsize
+
+The example GPU executable currently selects the CUDA executor automatically
+only for \code{Lanczos} and \code{BlockLanczos}.  The standard Krylov--Schur
+library implementation is executor-aware, but the example driver does not yet
+dispatch that solver to CUDA.
+
+\subsection{Krylov subspaces and matrix-free application}
+
+Given a starting vector $v$, the order-$m$ Krylov subspace is
+\begin{equation}
+  \Kspace{m}{A,v}=\operatorname{span}\{v,Av,A^2v,\ldots,A^{m-1}v\}.
+\end{equation}
+\fasteig{} never requires the solver algorithm to expose an explicit $A$.
+The selected \code{LinearOperator} supplies the action of $A$, $-A$,
+$(A-\sigma I)^{-1}$, or a user-provided matrix-free operation.  This is why the
+same recurrence can run with CPU CSR, CUDA CSR, or shift-invert solves.
+
+The classes \code{core::KrylovSubspace} and
+\code{core::BlockKrylovSubspace} collect the shared basis-building operations:
+normalization, operator application, orthogonalization, block QR, and basis
+rotation.  Solver source files still call those steps explicitly so their main
+loops read like the corresponding numerical algorithms.
+
+\subsection{Orthogonalization and block QR}
+
+Scalar Lanczos uses two-pass projection against the active basis.  If $z=Aq_j$,
+the implementation computes
+\begin{align}
+  h &= Q_j^T z,            & f &= z-Q_jh,\\
+  s &= Q_j^T f,            & h &\leftarrow h+s,\qquad f\leftarrow f-Q_js.
+\end{align}
+This full reorthogonalization is more expensive than the ideal three-term
+Lanczos recurrence, but it protects the basis from loss of orthogonality and
+duplicate Ritz values.
+
+Block methods first use two-pass block Gram--Schmidt against all active basis
+columns.  The residual block $F$ is then factored as
+\begin{equation}
+  F=QR.
+\end{equation}
+The current Block Lanczos and Block Krylov--Schur paths explicitly request
+one-pass Cholesky QR:
+\begin{equation}
+  R^TR=F^TF, \qquad Q=FR^{-1}.
+\end{equation}
+It maps well to BLAS-3 kernels and is fast for well-conditioned tall-skinny
+blocks.  The core layer also implements Householder QR, Cholesky QR2,
+Gram--Schmidt QR, and SVQB, on CPU and (where supported) CUDA.  Cholesky QR2
+repeats Cholesky QR and is more stable for less well-conditioned blocks, at
+roughly twice the Gram-matrix and triangular-solve work~\cite{shiftedcholqr}.
+The current default remains one-pass Cholesky QR; a failed Cholesky factorization
+is reported rather than silently changing algorithms.
+
+\subsection{Rayleigh--Ritz extraction}
+
+For an orthonormal trial basis $Q$, Rayleigh--Ritz forms
+\begin{equation}
+  T=Q^TAQ,
+\end{equation}
+solves the small dense problem $Tc_j=\theta_j c_j$, and returns
+$y_j=Qc_j$.  The residual is orthogonal to the trial space:
+\begin{equation}
+  Q^T(Ay_j-\theta_jy_j)=0.
+\end{equation}
+This extraction appears in every subspace solver in \fasteig{}.  The
+Lanczos-family projected problem and selection helpers live in
+\code{core/RitzExtraction}; the older host-oriented solvers use the
+\code{fasteig\_solver::RayleighRitz} wrappers.
+
+For scalar Lanczos, the three-term relation gives an inexpensive residual
+estimate
+\begin{equation}
+  \norm{Ay_j-\theta_jy_j}
+    = |\beta_{m+1}e_m^Tc_j|.
+  \label{eq:lanczos-residual-estimate}
+\end{equation}
+Block Lanczos uses the corresponding norm of the last block coupling applied
+to the last rows of $c_j$.
+
+\subsection{Shift-and-invert}
+\label{sec:sai}
+
+For a target $\sigma$, SAI replaces $A$ by
+\begin{equation}
+  S=(A-\sigma I)^{-1}.
+\end{equation}
+If $Ax=\lambda x$, then
+\begin{equation}
+  Sx=\mu x,\qquad \mu=\frac{1}{\lambda-\sigma},\qquad
+  \lambda=\sigma+\frac{1}{\mu}.
+\end{equation}
+Eigenvalues nearest $\sigma$ become the largest-magnitude eigenvalues of $S$;
+therefore \code{SAI} orders the transformed Ritz values as \code{LM}, then maps
+them back to the original scale.  Final residuals are recomputed with the
+original $A$, not trusted solely from the transformed projected problem.
+
+CPU SAI factorizes $A-\sigma I$ once with Eigen SimplicialLDLT or MKL
+PardisoLDLT, depending on the build.  CUDA SAI constructs a
+\code{CudaShiftInvertOperator}, analyzes and factorizes once with cuDSS, and
+uses a cuDSS solve for every operator application.  The current CUDA path uses
+the conservative general/full CSR descriptor.  SAI is available in Lanczos and
+standard Krylov--Schur, not in the block methods or the generalized problem.
+
+\section{Lanczos}
+\label{sec:lanczos}
+
+\subsection{Purpose and mathematical idea}
+
+Lanczos is the simplest general-purpose solver in \fasteig{} and the best
+baseline for a few extremal eigenpairs.  Applied to a symmetric operator, it
+constructs $Q_m$ and a symmetric tridiagonal $T_m$ such that
+\begin{equation}
+  AQ_m = Q_mT_m + \beta_{m+1}q_{m+1}e_m^T.
+\end{equation}
+The eigenpairs of $T_m$ approximate those of $A$~\cite{lanczos,saad}.
+
+The textbook method uses a three-term recurrence.  The \fasteig{}
+implementation instead reorthogonalizes each new operator result against the
+entire active basis.  That choice improves numerical robustness but changes the
+orthogonalization cost from a short recurrence to a growing dense operation.
+
+\subsection{Implementation-faithful pseudocode}
+
+\begin{lstlisting}
+Input: operator op, initial vector x, nev p, maximum dimension m_max
+Allocate executor vectors x, z and basis Q(:, 1:m_max)
+Allocate executor-specific Lanczos projected workspace
+
+for j = 1, ..., m_max
+    beta_j = ||x||_2
+    if beta_j is zero, generate and orthogonalize a restart vector
+    q_j = x / beta_j
+
+    z = op(q_j)
+    [alpha_j, x] = two_pass_orthogonalize(Q(:,1:j), z)
+    beta_next = ||x||_2
+    record alpha_j, beta_j, beta_next in projected workspace
+
+    when a progress/convergence snapshot is due
+        diagonalize T_j and select the requested Ritz pairs
+        estimate residuals from beta_next and the last Ritz-vector row
+        stop when every requested estimate is below tol
+    end
+end
+
+Form Y = Q(:,1:m) * C_selected in executor memory
+If SAI, map mu to lambda = shift + 1/mu
+Copy final public eigenvectors to the host and recompute final residuals
+\end{lstlisting}
+
+When \code{print\_every} is positive, it determines the snapshot cadence.  If
+printing is disabled, convergence is checked every five basis expansions and at
+the final allowed iteration.  Thus the reported iteration count may differ by a
+few steps between numerically equivalent CPU and GPU runs because their first
+snapshot satisfying the tolerance can differ slightly.
+
+\subsection{Cost, storage, and parameters}
+
+With $m$ iterations and $\operatorname{nnz}(A)$ stored nonzeros, the sparse
+products cost roughly $O(m\operatorname{nnz}(A))$.  Full reorthogonalization
+costs $O(nm^2)$ in total and the basis requires $O(nm)$ storage.  The projected
+eigensolves are only $m\times m$, but doing them frequently can become visible.
+
+The principal controls are \code{nev}, \code{maxiter}, \code{which},
+\code{tol}, \code{print\_every}, \code{seed}, and, for \code{SAI},
+\code{shift}.  Here \code{maxiter} is both the iteration limit and the maximum
+basis dimension.  Lanczos is unrestarted, so use Krylov--Schur if this storage
+is unacceptable.
+
+\section{Block Lanczos}
+\label{sec:block-lanczos}
+
+\subsection{Purpose and mathematical idea}
+
+Block Lanczos starts from a block $X_0\in\RR^{n\times b}$ and expands
+\begin{equation}
+  \operatorname{span}\{X_0,AX_0,A^2X_0,\ldots\}.
+\end{equation}
+The projected matrix is block tridiagonal.  A block can capture several
+directions in a clustered or multiple eigenspace at once, and the dense block
+operations generally use modern hardware more efficiently than scalar dot
+products~\cite{blocklanczos}.
+
+\subsection{Implementation-faithful pseudocode}
+
+\begin{lstlisting}
+Input: operator op, initial block X0, block size b, max_blocks
+Q_0 = cholqr(X0)
+
+for k = 0, ..., max_blocks-1
+    Z = op(Q_k)
+
+    H = Q_active^T Z
+    F = Z - Q_active H
+    S = Q_active^T F               # reorthogonalization pass
+    H = H + S
+    F = F - Q_active S
+
+    [Q_{k+1}, B_{k+1}] = cholqr(F)
+    A_k = the rows of H associated with Q_k
+    record A_k and B_{k+1} in the block projected matrix
+
+    diagonalize the active block projected matrix
+    estimate Ritz residuals from B_{k+1} and the final coefficient block
+    stop when all requested estimates are below tol
+end
+
+Form selected Ritz vectors from all active basis blocks
+Recompute final residuals with the original operator
+\end{lstlisting}
+
+The input \code{blksize} sets $b$, while \code{maxiter} counts block
+expansions rather than scalar matrix-vector products.  The largest allocated
+basis has approximately $(\code{maxiter}+1)b$ columns, and the projected Ritz
+space after $k$ completed blocks has dimension $kb$.
+
+\subsection{Cost and cautions}
+
+Each iteration applies the operator to $b$ vectors, so the nominal sparse work
+is $b$ SpMVs.  Orthogonalization is block Gram--Schmidt followed by Cholesky QR
+and is expressed mainly with matrix-matrix kernels.  Storage remains unrestarted
+and scales as $O(nbm_{\mathrm{block}})$.  A block size at least as large as the
+expected multiplicity is often useful, but an unnecessarily large block
+increases every sparse product, QR, and projected eigensolve.
+
+\par\medskip
+\noindent\textbf{Implementation note.}
+The current implementation uses Cholesky QR on both CPU and CUDA.  Cholesky QR
+is fast but assumes the residual block is sufficiently well conditioned.  A
+rank-deficient block causes the factorization to fail; adaptive shrinking is not
+yet implemented.  Block Lanczos does not currently support SAI or generalized
+problems.
+
+\section{Krylov--Schur}
+\label{sec:krylov-schur}
+
+\subsection{Purpose and mathematical idea}
+
+Krylov--Schur is a restarted Krylov method.  It expands a basis to a fixed
+dimension, computes a Schur/Ritz decomposition of the projected problem, keeps
+the wanted directions, and expands again.  It is closely related to thick
+restart Lanczos for symmetric problems, while making the restart and deflation
+steps explicit and flexible~\cite{krylovschur}.
+
+The key advantage over unrestarted Lanczos is bounded large-vector storage.
+The tradeoff is that discarded spectral information may need to be rebuilt in
+later cycles.
+
+\subsection{Standard-problem pseudocode}
+
+\begin{lstlisting}
+Choose k = min(max(2*nev, 20), n)
+Create executor-resident basis Q(:,1:k), residual x, and projection workspace
+Expand a Lanczos basis from column 1 through k
+
+for restart_cycle = 1, ..., maxiter
+    diagonalize the k-by-k projected matrix
+    order all Ritz pairs according to which
+    count converged requested pairs using projected residual estimates
+
+    if all requested pairs converged or this is the last cycle
+        form final Ritz vectors and return
+    end
+
+    retained = nev + min(number_converged, (k-nev)/2)
+    rotate Q to the retained wanted Ritz vectors
+    seed the compact restart projection with Ritz values and residual coupling
+    expand the basis from retained+1 back to k
+end
+\end{lstlisting}
+
+In this implementation \code{maxiter} counts restart cycles, not individual
+SpMVs.  The standard-problem subspace dimension is presently the internal value
+$\min(\max(2p,20),n)$; \code{maxdim} does not override it.  The projected
+convergence test compares the absolute estimate with
+\code{tol}$\,|\theta|$.  The final driver residual still uses
+Equation~\eqref{eq:standard-residual}.
+
+The standard path supports the same target codes and SAI transformation as
+Lanczos.  Its large basis and projected workspace are executor-aware.  In a
+CUDA-enabled library call they can remain on the device across restart cycles.
+
+\subsection{Generalized Krylov--Schur}
+
+For Equation~\eqref{eq:generalized}, the current host-only path builds a
+$B$-orthonormal basis,
+\begin{equation}
+  Q^TBQ=I,
+\end{equation}
+and applies the self-adjoint operator $B^{-1}A$ in the $B$ inner product.  It
+stores both $Q$ and $BQ$.  Given a residual-like vector $f$, an expansion step
+normalizes with
+\begin{equation}
+  \lVert f\rVert_B=\sqrt{f^TBf},
+\end{equation}
+computes $y=B^{-1}Aq$, and performs two-pass $B$-orthogonalization.  Restarting
+rotates the retained basis and recomputes $BQ$ for those columns.
+
+Before iteration, \fasteig{} factorizes $B$ once with Eigen SimplicialLDLT or
+MKL PardisoLDLT.  The implementation assumes $B$ is symmetric positive
+definite.  CUDA generalized problems and generalized SAI are not supported.
+
+\section{Block Krylov--Schur}
+\label{sec:block-krylov-schur}
+
+Block Krylov--Schur combines a block Lanczos expansion with a compact restart.
+It is intended for several clustered or multiple eigenpairs when an unrestarted
+block basis would be too large~\cite{blockkrylovschur}.
+
+The current implementation sets the block width equal to \code{nev}, rather
+than reading \code{blksize}.  The requested cycle dimension is \code{maxdim},
+or $\max(2p,20)$ if \code{maxdim} is zero.  It must be at least $2p$ and is
+rounded down to a whole number of $p$-column blocks.
+
+\begin{lstlisting}
+Set b = nev and choose cycle dimension k from maxdim
+Build a block Krylov cycle with one extra residual block
+
+for restart_cycle = 1, ..., maxiter
+    symmetrize and diagonalize the k-by-k projected matrix
+    select b wanted Ritz pairs
+    form Ritz vectors Y = Q*C
+    compute block residual estimates from B_last*C_last
+
+    if converged or at maxiter, return Y
+
+    retain Y as the first block
+    retain the residual basis as the second block
+    seed the projected matrix with Ritz values and residual coupling
+    expand block Lanczos back to the cycle dimension
+end
+\end{lstlisting}
+
+The block basis builder uses the shared \code{BlockKrylovSubspace}, two-pass
+block Gram--Schmidt, and Cholesky QR.  However, the outer cycle, projected
+matrix, and restart basis are currently host Eigen matrices.  A CUDA operator
+therefore incurs host/device copies at cycle boundaries; this is an
+executor-aware but not fully device-resident implementation.  SAI and
+generalized problems are not supported.
+
+\section{Davidson}
+\label{sec:davidson}
+
+Davidson expands a trial subspace with corrections derived from Ritz
+residuals.  Its original strength is that a cheap approximation to
+$(A-\theta I)^{-1}$, often based on the diagonal of $A$, can greatly accelerate
+the lowest eigenpairs~\cite{davidson}.  The current \fasteig{} implementation
+has the subspace and locking structure of a block Davidson method, but uses the
+raw residual as the correction vector; no Davidson preconditioner is active.
+
+\begin{lstlisting}
+Orthonormalize the initial nev vectors with Cholesky QR
+Perform Rayleigh-Ritz to obtain initial Ritz vectors and residuals
+
+for outer_cycle = 1, ..., maxiter
+    start Q with the current Ritz vectors
+
+    for block = 2, ..., maxblks
+        mark vectors satisfying lock_tol as locked
+        W = residuals of active Ritz vectors        # no preconditioner today
+        orthogonalize W twice against Q
+        Q_new = householder_qr(W)
+        append Q_new and op(Q_new) to the subspace
+        solve the projected eigenproblem
+        update Ritz vectors, values, and residuals
+    end
+
+    stop if the first nev residuals satisfy tol
+end
+\end{lstlisting}
+
+The large trial matrices are host-resident.  Operator applications go through
+the executor-aware \code{LinearOperator}, so a CUDA operator can be called, but
+each new host block must cross the memory boundary.  In practice this path
+should be considered CPU/hybrid until the full Davidson state and correction
+preconditioner are moved into core executor objects.
+
+\code{maxblks} limits the number of correction blocks per outer cycle and
+therefore the peak basis size, approximately \code{maxblks}$\times\code{nev}$.
+The method handles the high end by applying the low-end algorithm to $-A$ for
+\code{LR}/\code{LM}.
+
+\section{LOBPCG}
+\label{sec:lobpcg}
+
+The Locally Optimal Block Preconditioned Conjugate Gradient method maintains
+three blocks: current approximations $X$, previous search directions $P$, and
+preconditioned residuals $W$.  A Rayleigh--Ritz minimization in
+\begin{equation}
+  \operatorname{span}\{X,P,W\}
+\end{equation}
+chooses locally optimal updates.  Its memory is $O(np)$ rather than a growing
+Krylov basis, and it is especially effective with a good preconditioner
+\cite{lobpcg,robustlobpcg}.
+
+\begin{lstlisting}
+Initialize X from v0/random vectors and perform an initial Rayleigh-Ritz step
+Initialize P with random unit vectors and compute A*P
+
+for k = 1, ..., maxiter
+    lock converged Ritz pairs in order
+    W = A*X - X*Lambda for the unconverged columns
+    apply preconditioner to W                    # not active in current code
+    if required, orthogonalize W against [X, P]
+    compute A*W
+
+    perform modified Rayleigh-Ritz in S = [X, P, W]
+    if the overlap is poorly conditioned
+        orthogonalize W, recompute A*W, and repeat Rayleigh-Ritz
+    end
+
+    update X, P, A*X, A*P, and residuals
+    stop when all requested residuals satisfy tol
+end
+\end{lstlisting}
+
+The modified Rayleigh--Ritz step scales the overlap matrix, attempts a Cholesky
+reduction of the generalized projected problem, and switches to explicit
+orthogonalization when conditioning becomes poor.  Its SVQB helper repairs or
+drops weak overlap directions.  Locking is ordered so a later Ritz pair is not
+removed before all preceding requested pairs have converged.
+
+The current preconditioner section is commented out.  Consequently $W$ is the
+unpreconditioned residual, and the implementation should be viewed as LOBPCG
+without its most important application-specific accelerator.  Dense state is
+host-resident; only operator applications use the selected executor.  The high
+end is handled with the same $-A$ transformation used by Davidson.
+
+\section{Chebyshev-filtered subspace iteration}
+\label{sec:chebyshev}
+
+Chebyshev filtering applies a polynomial $p_d(A)$ that amplifies the wanted
+spectral interval while damping the unwanted one.  It then orthonormalizes the
+filtered block and performs Rayleigh--Ritz.  The approach replaces many
+sequential vector recurrences with block operator applications and is
+particularly attractive for a sequence of related eigenproblems with a good
+initial subspace~\cite{chefsi}.
+
+\subsection{Filter construction}
+
+The current solver first runs a short, 20-step (or smaller) Lanczos estimate of
+the spectral lower and upper bounds.  Let these estimates be $a$ and $b$, and
+let the filter degree be $d$.  With the hard-coded amplification ratio
+$r=10^3$, it computes
+\begin{align}
+  x_{\ell} &= \cosh\!\left(\frac{\operatorname{acosh}(r)}{d}\right),\\
+  \ell &= \frac{2a+bx_{\ell}-b}{1+x_{\ell}},\\
+  c &= \frac{2}{b-\ell}, \qquad e=-\frac{b+\ell}{b-\ell}.
+\end{align}
+The mapped operator is $cA+eI$, and the Chebyshev recurrence is
+\begin{equation}
+  V_0=V,\qquad V_1=(cA+eI)V_0,\qquad
+  V_k=2(cA+eI)V_{k-1}-V_{k-2}.
+\end{equation}
+
+\subsection{Implementation-faithful pseudocode}
+
+\begin{lstlisting}
+Estimate spectral bounds with a short Lanczos run
+Create an initial active block plus up to nev spare vectors
+Orthonormalize with Cholesky QR
+
+for filter_cycle = 1, ..., maxiter
+    apply the degree-d Chebyshev recurrence to active columns
+    deflate active columns against locked Ritz vectors
+    orthonormalize the current subspace with Cholesky QR
+    perform Rayleigh-Ritz
+    lock converged requested pairs in order
+    activate spare vectors to keep the filtered block populated
+    stop when all requested pairs are locked
+end
+\end{lstlisting}
+
+The work per cycle is approximately \code{degree} block applications, plus QR
+and Rayleigh--Ritz.  Too small a degree weakly separates the wanted interval;
+too large a degree increases work and may magnify scaling errors.  The current
+implementation is host-resident around an executor-aware operator.  It handles
+the high end by filtering $-A$.  Generalized problems and SAI are not supported.
+
+\section{SPPC}
+\label{sec:sppc}
+
+Subspace Projection with Perturbative Corrections is specialized for a
+hierarchical Hamiltonian whose leading principal submatrix represents a useful
+smaller configuration space.  It begins with eigenvectors of that leading
+problem, generates Rayleigh--Schr\"odinger-like correction vectors by solving
+small shifted systems, and applies Rayleigh--Ritz in the accumulated correction
+subspace~\cite{sppc}.
+
+In the current driver, \code{maxdim} is interpreted as the split size $n_s$.
+The problem constructs
+\begin{itemize}[leftmargin=*]
+  \item \code{H0}, the $n_s\times n_s$ leading principal matrix; and
+  \item \code{V21}, the lower-left coupling block.
+\end{itemize}
+The initial $p$ eigenpairs of \code{H0} are computed by an internal
+Krylov--Schur solve and padded with zeros to the full dimension.
+
+\begin{lstlisting}
+Solve the leading H0 eigenproblem for p initial eigenpairs
+
+for each requested initial eigenpair (lambda0, v0)
+    start correction basis N with v0
+    compute the first analytic perturbative correction
+
+    for perturbation order k = 1, ..., maxiter
+        form the next correction right-hand side
+        solve (H0 - lambda0 I) y = rhs with MINRES
+        remove the v0 component and form the full correction vector
+        reorthogonalize the correction against N
+        append it to N and compute A times the new basis vector
+        solve the projected Rayleigh-Ritz problem
+        stop when the projected residual satisfies tol
+    end
+end
+\end{lstlisting}
+
+This is not a generic partitioning strategy: it assumes the leading problem is
+both much cheaper and physically informative.  The present implementation is
+the independent-eigenpair SPPC variant and is host-oriented.  It prints its own
+per-perturbation progress, and its linear solves use the legacy
+\code{operations::minres} callback.
+
+\section{RMM-DIIS}
+\label{sec:rmm-diis}
+
+Residual Minimization Method with Direct Inversion in the Iterative Subspace
+is a refinement algorithm.  It extrapolates previous corrections to reduce the
+eigen-residual and combines the current vector with a correction in a small
+generalized Rayleigh--Ritz problem.  It is widely associated with electronic
+structure calculations~\cite{kresse}.
+
+The \fasteig{} solver first performs an internal Krylov--Schur solve at tolerance
+$10^{-3}$ to obtain initial vectors.  Each requested pair is then refined
+independently:
+
+\begin{lstlisting}
+Obtain approximate vectors from a loose-tolerance Krylov-Schur solve
+
+for each approximate eigenvector v
+    normalize v; compute theta = v^T A v and residual r
+    obtain a correction w1 from the shifted correction callback
+
+    for k = 1, ..., maxiter
+        extrapolate from stored correction differences with DIIS least squares
+        recompute theta and r
+        obtain a new shifted correction w
+        solve the 2-by-2 generalized Ritz problem in span{v, w}
+        store the updated vector and operator image
+        stop when ||r||/|theta| < tol
+    end
+end
+\end{lstlisting}
+
+This solver is host-oriented and stores a history whose size grows with
+\code{maxiter}.  More importantly, the explicit-matrix default
+\code{operations::CG} currently solves only a placeholder scaled-identity
+system.  Meaningful RMM-DIIS use therefore requires a suitable user-supplied
+correction/preconditioning callback or a future replacement of that default.
+It should be treated as a refinement stage, not as the first method tried from
+a random vector.
+
+\section{Parameter guide}
+\label{sec:parameters}
+
+\small
+\begin{longtable}{P{0.17\textwidth} P{0.24\textwidth} P{0.49\textwidth}}
+\caption{Algorithm-facing input options.}
+\label{tab:parameters}\\
+\toprule
+Option & Main consumers & Interpretation \\
+\midrule
+\endfirsthead
+\toprule
+Option & Main consumers & Interpretation \\
+\midrule
+\endhead
+\code{solver} & All & Selects Lanczos, BlockLanczos, BlockKrylovSchur, KrylovSchur, Davidson, LOBPCG, Chebyshev, SPPC, or RMM-DIIS. \\
+\code{nev} & All & Number of requested pairs. It is also the block width in the current Block Krylov--Schur implementation. \\
+\code{which} & All & Target-selection code; support differs as described in Section~\ref{sec:selection}. \\
+\code{tol} & All & Convergence threshold. Intermediate definitions differ; final residuals use Equations~\eqref{eq:standard-residual} and \eqref{eq:generalized-residual}. \\
+\code{maxiter} & All & Scalar expansions for Lanczos; block expansions for Block Lanczos; restart/filter/outer cycles for several other solvers; perturbation/refinement count for SPPC and RMM-DIIS. \\
+\code{blksize} & Block Lanczos & Number of vectors per block. It is not currently the Block Krylov--Schur width. \\
+\code{maxdim} & Block Krylov--Schur, SPPC & Restart-cycle dimension for Block Krylov--Schur; leading split size $n_s$ for SPPC. Standard Krylov--Schur currently chooses its own dimension. \\
+\code{maxblks} & Davidson API & Maximum correction blocks per Davidson outer cycle. \\
+\code{degree} & Chebyshev & Degree of the polynomial filter. \\
+\code{shift} & SAI & Target $\sigma$ in $(A-\sigma I)^{-1}$. \\
+\code{seed} & Initial-vector paths & Reproducible initial vectors. Executor creation uses the same seeded host sequence before a one-time CUDA copy. \\
+\code{print\_every} & Iterative progress & Progress cadence; in Lanczos and Krylov--Schur it also determines snapshot/check cadence when positive. \\
+\bottomrule
+\end{longtable}
+\normalsize
+
+The meaning of an ``iteration'' is solver-specific.  Comparing iteration
+counts across scalar, block, restarted, and polynomial methods is therefore
+misleading.  Matrix/block-operator applications and total runtime are better
+cross-method measures.
+
+\section{Numerical and performance guidance}
+
+\subsection{Accuracy checks}
+
+Always judge final accuracy using the explicitly recomputed residuals.  A tiny
+projected residual with a large final residual indicates a loss of
+orthogonality, an inconsistent operator, a failed transformation, or a bug in
+the recurrence/projection coupling.  For clustered or repeated eigenvalues,
+also inspect subspace agreement rather than demanding identical individual
+eigenvectors: any orthonormal rotation within a degenerate invariant subspace is
+valid.
+
+CPU and CUDA runs need not stop on exactly the same snapshot.  Floating-point
+reductions occur in different orders, so projected values and residuals can
+differ at roundoff level.  A fixed \code{seed}, matching options, and final
+residual comparisons provide the meaningful reproducibility test.
+
+\subsection{Memory and restart tradeoffs}
+
+Lanczos and Block Lanczos are unrestarted and store every basis vector.  This is
+often acceptable for a few hundred iterations, but memory grows linearly with
+the iteration count and orthogonalization work grows quadratically.  Krylov--Schur
+and Block Krylov--Schur cap the basis but may require additional cycles after
+discarding unwanted directions.  LOBPCG keeps only a few $p$-column blocks and
+therefore has the smallest predictable large-vector footprint among the
+general block methods.
+
+\subsection{CPU and GPU expectations}
+
+Moving data to a GPU is useful only when enough work is done before it returns.
+Lanczos keeps the basis, sparse products, reorthogonalization, projected
+workspace, and final Ritz multiplication behind CUDA executor objects.  Block
+Lanczos increases arithmetic intensity through block kernels.  In contrast,
+the current hybrid solvers repeatedly materialize Eigen host matrices; a CUDA
+operator alone does not make those algorithms GPU-efficient.
+
+CUDA startup, matrix upload, and SAI factorization are one-time costs.  Include
+them for end-to-end timing, but separate them when studying repeated solves
+that can reuse an executor or factorization.  For SAI, compare the cost of the
+factorization plus triangular solves against the reduction in Krylov iterations.
+
+\section{Implementation map}
+
+The main source locations are listed below so that the mathematical discussion
+can be connected to the code without placing code-level details in the user's
+guide.
+
+\begin{center}
+\small
+\begin{tabular}{P{0.37\textwidth} P{0.53\textwidth}}
+\toprule
+Location & Responsibility \\
+\midrule
+\code{src/*Solver.cpp} & Solver-level loops, options, stopping, locking, and restart policies. \\
+\code{include/core/Executor.hpp} & Memory-space and backend factory interface. \\
+\code{core/Vector}, \code{core/MultiVector} & Executor-owned vector and block-vector primitives. \\
+\code{core/LinearOperator}, \code{core/CsrMatrix} & Abstract operator and explicit CSR implementations. \\
+\code{core/KrylovSubspace} & Shared scalar and block basis-building steps. \\
+\code{core/Orthogonalization} & CPU/CUDA QR, SVQB, and block Gram--Schmidt. \\
+\code{core/LanczosWorkspace} & CPU/CUDA projected-matrix recording, snapshots, restarts, and finalization. \\
+\code{core/RitzExtraction} & Ritz ordering, residual estimates, SAI back-transformation, and progress snapshots. \\
+\code{src/gpu/Cuda*.cpp} & CUDA vectors, multivectors, CSR, workspace, and cuDSS shift-invert operator. \\
+\code{src/fasteig\_problem.cpp} & Executor/operator construction, SAI and $B$ factorization, solver dispatch preparation. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{References}
+
+\begin{thebibliography}{99}
+
+\bibitem{lanczos}
+C. Lanczos,
+``An iteration method for the solution of the eigenvalue problem of linear
+differential and integral operators,''
+\emph{Journal of Research of the National Bureau of Standards},
+45, 255--282, 1950.
+\href{https://doi.org/10.6028/jres.045.026}{doi:10.6028/jres.045.026}.
+
+\bibitem{blocklanczos}
+G. H. Golub and R. R. Underwood,
+``The Block Lanczos Method for Computing Eigenvalues,'' in
+\emph{Mathematical Software III}, 361--377, 1977.
+\href{https://doi.org/10.1016/B978-0-12-587260-7.50018-2}%
+{doi:10.1016/B978-0-12-587260-7.50018-2}.
+
+\bibitem{krylovschur}
+G. W. Stewart,
+``A Krylov--Schur Algorithm for Large Eigenproblems,''
+\emph{SIAM Journal on Matrix Analysis and Applications},
+23(3), 601--614, 2001.
+\href{https://doi.org/10.1137/S0895479800371529}%
+{doi:10.1137/S0895479800371529}.
+
+\bibitem{blockkrylovschur}
+Y. Zhou and Y. Saad,
+``Block Krylov--Schur method for large symmetric eigenvalue problems,''
+\emph{Numerical Algorithms}, 47, 341--359, 2008.
+\href{https://doi.org/10.1007/s11075-008-9192-9}%
+{doi:10.1007/s11075-008-9192-9}.
+
+\bibitem{davidson}
+E. R. Davidson,
+``The iterative calculation of a few of the lowest eigenvalues and
+corresponding eigenvectors of large real-symmetric matrices,''
+\emph{Journal of Computational Physics}, 17(1), 87--94, 1975.
+\href{https://doi.org/10.1016/0021-9991(75)90065-0}%
+{doi:10.1016/0021-9991(75)90065-0}.
+
+\bibitem{lobpcg}
+A. V. Knyazev,
+``Toward the Optimal Preconditioned Eigensolver: Locally Optimal Block
+Preconditioned Conjugate Gradient Method,''
+\emph{SIAM Journal on Scientific Computing}, 23(2), 517--541, 2001.
+\href{https://doi.org/10.1137/S1064827500366124}%
+{doi:10.1137/S1064827500366124}.
+
+\bibitem{robustlobpcg}
+J. A. Duersch, M. Shao, C. Yang, and M. Gu,
+``A Robust and Efficient Implementation of LOBPCG,''
+\emph{SIAM Journal on Scientific Computing}, 40(5), C655--C676, 2018.
+\href{https://doi.org/10.1137/17M1129830}{doi:10.1137/17M1129830}.
+
+\bibitem{chefsi}
+Y. Zhou, Y. Saad, M. L. Tiago, and J. R. Chelikowsky,
+``Self-consistent-field calculations using Chebyshev-filtered subspace
+iteration,''
+\emph{Journal of Computational Physics}, 219(1), 172--184, 2006.
+\href{https://doi.org/10.1016/j.jcp.2006.03.017}%
+{doi:10.1016/j.jcp.2006.03.017}.
+
+\bibitem{sppc}
+D. M. Roh, D. Lee, P. Maris, E. Ng, J. P. Vary, and C. Yang,
+``Accelerating eigenvalue computation for nuclear structure calculations via
+perturbative corrections,''
+\emph{Journal of Computational Physics}, 531, 113921, 2025.
+\href{https://doi.org/10.1016/j.jcp.2025.113921}%
+{doi:10.1016/j.jcp.2025.113921}.
+
+\bibitem{kresse}
+G. Kresse and J. Furthm\"uller,
+``Efficient iterative schemes for ab initio total-energy calculations using a
+plane-wave basis set,''
+\emph{Physical Review B}, 54, 11169--11186, 1996.
+\href{https://doi.org/10.1103/PhysRevB.54.11169}%
+{doi:10.1103/PhysRevB.54.11169}.
+
+\bibitem{saad}
+Y. Saad,
+\emph{Numerical Methods for Large Eigenvalue Problems}, revised edition,
+SIAM, 2011.
+\href{https://doi.org/10.1137/1.9781611970739}%
+{doi:10.1137/1.9781611970739}.
+
+\bibitem{shiftedcholqr}
+T. Fukaya, R. Kannan, Y. Nakatsukasa, Y. Yamamoto, and Y. Yanagisawa,
+``Shifted Cholesky QR for Computing the QR Factorization of Ill-Conditioned
+Matrices,''
+\emph{SIAM Journal on Scientific Computing}, 42(1), A477--A503, 2020.
+\href{https://doi.org/10.1137/18M1218212}{doi:10.1137/18M1218212}.
+
+\bibitem{ginkgo}
+H. Anzt et al.,
+``Ginkgo: A Modern Linear Operator Algebra Framework for High Performance
+Computing,''
+\emph{Journal of Open Source Software}, 5(52), 2260, 2020.
+\href{https://doi.org/10.21105/joss.02260}{doi:10.21105/joss.02260}.
+
+\end{thebibliography}
+
+\end{document}
