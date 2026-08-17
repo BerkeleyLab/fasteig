@@ -70,21 +70,17 @@ public:
   BlockKrylovSubspace(const LinearOperator& op,
                       const MultiVector& initial_block,
                       MultiVector& basis);
-  BlockKrylovSubspace(const LinearOperator& op,
-                      const MultiVector& initial_block,
-                      MultiVector& basis,
-                      LanczosWorkspace& projection);
 
-  void build(FASTEIG_INT begin, FASTEIG_INT end);
   void initialize_basis_block();
-  void set_basis_block(FASTEIG_INT block_index, const MultiVector& block);
   void apply_operator_to_basis_block(FASTEIG_INT block_index);
   void orthogonalize_operator_block(FASTEIG_INT active_cols);
   void qr_residual_block(FASTEIG_INT next_block_index);
+  void restart_with_ritz_block(
+      FASTEIG_INT active_cols,
+      const Eigen::Ref<const MatrixXd>& coefficients,
+      FASTEIG_INT residual_block_index);
   const MatrixXd& diagonal_block() const noexcept { return diagonal_block_; }
   const MatrixXd& coupling_block() const noexcept { return coupling_block_; }
-  MatrixXd ritz_vectors(FASTEIG_INT active_cols,
-                        const Eigen::Ref<const MatrixXd>& coefficients) const;
 
 private:
   void copy_block_to_basis(FASTEIG_INT first_col, const MultiVector& block);
@@ -92,9 +88,10 @@ private:
   const LinearOperator& op_;
   const MultiVector& initial_block_;
   MultiVector& basis_;
-  LanczosWorkspace* projection_ = nullptr;
   std::unique_ptr<MultiVector> operator_block_;
   std::unique_ptr<MultiVector> residual_block_;
+  std::unique_ptr<MultiVector> restart_ritz_block_;
+  std::unique_ptr<MultiVector> restart_residual_block_;
   MatrixXd diagonal_block_;
   MatrixXd coupling_block_;
   bool initialized_ = false;

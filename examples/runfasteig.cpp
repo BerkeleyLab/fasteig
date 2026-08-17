@@ -58,7 +58,8 @@ int main(int argc, const char* argv[])
 #endif
   const std::string solver_l = lower_copy(opts.solver());
   if (gpu_exec && (solver_l == "lanczos" || solver_l == "gpulanczos" ||
-                   solver_l == "blocklanczos" || solver_l == "gpublocklanczos")) {
+                   solver_l == "blocklanczos" || solver_l == "gpublocklanczos" ||
+                   solver_l == "krylovschur" || solver_l == "blockkrylovschur")) {
     if (solver_l == "gpulanczos") {
       opts.set("solver", "Lanczos");
     } else if (solver_l == "gpublocklanczos") {

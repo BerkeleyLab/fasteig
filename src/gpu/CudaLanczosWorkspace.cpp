@@ -290,6 +290,40 @@ void CudaLanczosWorkspace::prepare_krylov_schur_restart(
   restart_coupling_row_ = retained_cols;
 }
 
+void CudaLanczosWorkspace::prepare_block_krylov_schur_restart(
+    FASTEIG_INT block_size,
+    const VectorXd& retained_values,
+    const MatrixXd& coupling_block,
+    const char* solver_name) {
+  if (block_size <= 0 || retained_values.size() != block_size ||
+      coupling_block.rows() != block_size || coupling_block.cols() != block_size) {
+    throw std::invalid_argument(std::string(solver_name) +
+                                ": invalid block Krylov-Schur restart data.");
+  }
+  if (2 * block_size > maxiter_) {
+    throw std::invalid_argument(std::string(solver_name) +
+                                ": projected matrix is too small for block restart.");
+  }
+
+  auto& context = cuda_executor_from(
+      exec_, "CudaLanczosWorkspace::prepare_block_krylov_schur_restart").context();
+  const std::size_t matrix_size = static_cast<std::size_t>(maxiter_) *
+                                  static_cast<std::size_t>(maxiter_);
+  FASTEIG_CUDA_CHECK(cudaMemsetAsync(d_T_, 0, matrix_size * sizeof(double),
+                                     context.stream()));
+
+  const MatrixXd diagonal = retained_values.asDiagonal();
+  copy_host_block_to_device(d_T_, maxiter_, 0, 0, diagonal, context.stream());
+  copy_host_block_to_device(d_T_, maxiter_, block_size, 0,
+                            coupling_block, context.stream());
+  const MatrixXd coupling_transpose = coupling_block.transpose();
+  copy_host_block_to_device(d_T_, maxiter_, 0, block_size,
+                            coupling_transpose, context.stream());
+  FASTEIG_CUDA_CHECK(cudaStreamSynchronize(context.stream()));
+  beta_block_ = coupling_block;
+  restart_coupling_row_ = -1;
+}
+
 void CudaLanczosWorkspace::finalize_eigenpairs(const LinearOperator& op,
                                                const MultiVector& basis,
                                                FASTEIG_INT active_cols,

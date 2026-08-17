@@ -8,15 +8,6 @@
 #include "core/Orthogonalization.hpp"
 #include "core/Vector.hpp"
 
-#ifdef USE_CUDA
-#include "gpu/CudaCheck.hpp"
-#include "gpu/CudaContext.hpp"
-#include "gpu/CudaMultiVector.hpp"
-#include "gpu/CudaUtils.hpp"
-
-#include <cuda_runtime.h>
-#endif
-
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -254,40 +245,6 @@ BlockKrylovSubspace::BlockKrylovSubspace(const LinearOperator& op,
   residual_block_ = op_.executor().create_multivector(op_.rows(), initial_block_.cols());
 }
 
-BlockKrylovSubspace::BlockKrylovSubspace(const LinearOperator& op,
-                                         const MultiVector& initial_block,
-                                         MultiVector& basis,
-                                         LanczosWorkspace& projection)
-    : BlockKrylovSubspace(op, initial_block, basis) {
-  projection_ = &projection;
-}
-
-void BlockKrylovSubspace::build(FASTEIG_INT begin, FASTEIG_INT end) {
-  if (begin < 0 || end < begin) {
-    throw std::invalid_argument("core::BlockKrylovSubspace::build: invalid range.");
-  }
-
-  const FASTEIG_INT b = initial_block_.cols();
-  const FASTEIG_INT required_cols = (end + 1) * b;
-  if (required_cols > basis_.cols()) {
-    throw std::invalid_argument("core::BlockKrylovSubspace::build: range exceeds basis columns.");
-  }
-
-  if (begin == 0) {
-    initialize_basis_block();
-  }
-
-  for (FASTEIG_INT i = begin + 1; i <= end; ++i) {
-    apply_operator_to_basis_block(i - 1);
-    orthogonalize_operator_block(i * b);
-    qr_residual_block(i);
-    if (!projection_) {
-      throw std::logic_error("core::BlockKrylovSubspace::build: no projection target configured.");
-    }
-    projection_->record_block_step(i - 1, b, diagonal_block_, coupling_block_);
-  }
-}
-
 void BlockKrylovSubspace::initialize_basis_block() {
   if (initialized_) return;
 
@@ -305,16 +262,6 @@ void BlockKrylovSubspace::initialize_basis_block() {
   }
   copy_block_to_basis(0, *residual_block_);
   initialized_ = true;
-}
-
-void BlockKrylovSubspace::set_basis_block(FASTEIG_INT block_index,
-                                          const MultiVector& block) {
-  const FASTEIG_INT b = initial_block_.cols();
-  if (block_index < 0 || block.cols() != b || block.rows() != basis_.rows()) {
-    throw std::invalid_argument("core::BlockKrylovSubspace::set_basis_block: block mismatch.");
-  }
-  copy_block_to_basis(block_index * b, block);
-  if (block_index == 0) initialized_ = true;
 }
 
 void BlockKrylovSubspace::apply_operator_to_basis_block(FASTEIG_INT block_index) {
@@ -356,16 +303,41 @@ void BlockKrylovSubspace::qr_residual_block(FASTEIG_INT next_block_index) {
   copy_block_to_basis(next_block_index * b, *residual_block_);
 }
 
-MatrixXd BlockKrylovSubspace::ritz_vectors(
+void BlockKrylovSubspace::restart_with_ritz_block(
     FASTEIG_INT active_cols,
-    const Eigen::Ref<const MatrixXd>& coefficients) const {
-  if (active_cols < 0 || active_cols > basis_.cols()) {
-    throw std::invalid_argument("core::BlockKrylovSubspace::ritz_vectors: invalid active column count.");
+    const Eigen::Ref<const MatrixXd>& coefficients,
+    FASTEIG_INT residual_block_index) {
+  const FASTEIG_INT b = initial_block_.cols();
+  if (!initialized_) {
+    throw std::logic_error(
+        "core::BlockKrylovSubspace::restart_with_ritz_block: basis not initialized.");
   }
-  if (coefficients.rows() != static_cast<int>(active_cols)) {
-    throw std::invalid_argument("core::BlockKrylovSubspace::ritz_vectors: coefficient row mismatch.");
+  if (active_cols <= 0 || active_cols > basis_.cols() ||
+      coefficients.rows() != static_cast<int>(active_cols) ||
+      coefficients.cols() != static_cast<int>(b)) {
+    throw std::invalid_argument(
+        "core::BlockKrylovSubspace::restart_with_ritz_block: coefficient mismatch.");
   }
-  return basis_.multiply_active_columns(active_cols, coefficients);
+  if (residual_block_index < 0 ||
+      (residual_block_index + 1) * b > basis_.cols()) {
+    throw std::invalid_argument(
+        "core::BlockKrylovSubspace::restart_with_ritz_block: residual block out of range.");
+  }
+
+  if (!restart_ritz_block_) {
+    restart_ritz_block_ = basis_.executor().create_multivector(basis_.rows(), b);
+    restart_residual_block_ = basis_.executor().create_multivector(basis_.rows(), b);
+  }
+
+  // Form V*C and preserve the trailing residual basis block before clearing V.
+  basis_.right_multiply_active_columns(active_cols, coefficients,
+                                       *restart_ritz_block_);
+  restart_residual_block_->copy_columns_from(
+      0, basis_, residual_block_index * b, b);
+
+  basis_.set_zero();
+  copy_block_to_basis(0, *restart_ritz_block_);
+  copy_block_to_basis(b, *restart_residual_block_);
 }
 
 void BlockKrylovSubspace::copy_block_to_basis(FASTEIG_INT first_col,
@@ -378,40 +350,7 @@ void BlockKrylovSubspace::copy_block_to_basis(FASTEIG_INT first_col,
     throw std::invalid_argument("core::BlockKrylovSubspace::copy_block_to_basis: dimension mismatch.");
   }
 
-  if (auto* cpu_basis = dynamic_cast<CpuMultiVector*>(&basis_)) {
-    const auto* cpu_block = dynamic_cast<const CpuMultiVector*>(&block);
-    if (!cpu_block) {
-      throw std::invalid_argument("core::BlockKrylovSubspace::copy_block_to_basis: CPU object mismatch.");
-    }
-    cpu_basis->values().block(0,
-                              static_cast<int>(first_col),
-                              static_cast<int>(block.rows()),
-                              static_cast<int>(block.cols())) = cpu_block->values();
-    return;
-  }
-
-#ifdef USE_CUDA
-  if (auto* cuda_basis = dynamic_cast<CudaMultiVector*>(&basis_)) {
-    const auto* cuda_block = dynamic_cast<const CudaMultiVector*>(&block);
-    if (!cuda_block) {
-      throw std::invalid_argument("core::BlockKrylovSubspace::copy_block_to_basis: CUDA object mismatch.");
-    }
-    const std::size_t offset =
-        static_cast<std::size_t>(first_col) * static_cast<std::size_t>(basis_.rows());
-    const std::size_t count =
-        static_cast<std::size_t>(block.rows()) * static_cast<std::size_t>(block.cols());
-    auto& context = cuda_executor_from(basis_.executor(),
-                                       "core::BlockKrylovSubspace::copy_block_to_basis").context();
-    FASTEIG_CUDA_CHECK(cudaMemcpyAsync(cuda_basis->data() + offset,
-                                       cuda_block->data(),
-                                       count * sizeof(double),
-                                       cudaMemcpyDeviceToDevice,
-                                       context.stream()));
-    return;
-  }
-#endif
-
-  throw std::invalid_argument("core::BlockKrylovSubspace::copy_block_to_basis: unsupported backend.");
+  basis_.copy_columns_from(first_col, block, 0, block.cols());
 }
 
 }  // namespace core

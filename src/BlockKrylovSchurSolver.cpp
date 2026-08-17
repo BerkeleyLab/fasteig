@@ -2,93 +2,21 @@
 
 #include "core/Executor.hpp"
 #include "core/KrylovSubspace.hpp"
+#include "core/LanczosWorkspace.hpp"
 #include "core/LinearOperator.hpp"
 #include "core/MultiVector.hpp"
+#include "core/RitzExtraction.hpp"
 #include "fasteig_logger.hpp"
 #include "fasteig_problem.hpp"
 
 #include <algorithm>
-#include <cctype>
-#include <cmath>
+#include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <vector>
+#include <utility>
 
 namespace fasteig {
-namespace {
-
-std::string lower_copy(std::string value) {
-  std::transform(value.begin(), value.end(), value.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return value;
-}
-
-std::vector<size_t> selected_indices(const VectorXd& values,
-                                     const std::string& which) {
-  const size_t n = static_cast<size_t>(values.size());
-  if (which != "be") return sort_indices(values, which);
-
-  std::vector<size_t> indices(n);
-  size_t pos = 0;
-  for (size_t j = 0; j < n / 2; ++j) {
-    indices[pos++] = n - 1 - j;
-    indices[pos++] = j;
-  }
-  if (n % 2 != 0) indices[pos] = n / 2;
-  return indices;
-}
-
-void build_block_krylov_cycle(const core::LinearOperator& op,
-                              const core::Executor& exec,
-                              const MatrixXd& seed_block,
-                              int begin,
-                              int end,
-                              MatrixXd& basis,
-                              MatrixXd& projected,
-                              MatrixXd& beta) {
-  const int n = static_cast<int>(basis.rows());
-  const int b = static_cast<int>(seed_block.cols());
-  if (begin < 0 || end < begin) {
-    throw std::invalid_argument("BlockKrylovSchurSolver: invalid block Krylov range.");
-  }
-  if (seed_block.rows() != n || b <= 0) {
-    throw std::invalid_argument("BlockKrylovSchurSolver: invalid block Krylov seed.");
-  }
-  if ((end + 1) * b > basis.cols()) {
-    throw std::invalid_argument("BlockKrylovSchurSolver: basis is too small for block Krylov cycle.");
-  }
-
-  auto initial_block = exec.create_multivector(seed_block);
-  auto exec_basis = exec.create_multivector(static_cast<FASTEIG_INT>(basis.rows()),
-                                            static_cast<FASTEIG_INT>(basis.cols()));
-  core::BlockKrylovSubspace subspace(op, *initial_block, *exec_basis);
-
-  if (begin == 0) {
-    subspace.initialize_basis_block();
-  } else {
-    for (int block = 0; block <= begin; ++block) {
-      auto seeded_block = exec.create_multivector(
-          basis.block(0, block * b, n, b));
-      subspace.set_basis_block(static_cast<FASTEIG_INT>(block), *seeded_block);
-    }
-  }
-
-  for (int i = begin + 1; i <= end; ++i) {
-    subspace.apply_operator_to_basis_block(static_cast<FASTEIG_INT>(i - 1));
-    subspace.orthogonalize_operator_block(static_cast<FASTEIG_INT>(i * b));
-    subspace.qr_residual_block(static_cast<FASTEIG_INT>(i));
-
-    beta = subspace.coupling_block();
-    projected.block((i - 1) * b, (i - 1) * b, b, b) = subspace.diagonal_block();
-    projected.block(i * b, (i - 1) * b, b, b) = beta;
-    projected.block((i - 1) * b, i * b, b, b) = beta.transpose();
-  }
-
-  basis = exec_basis->copy_to_host();
-}
-
-}  // namespace
 
 BlockKrylovSchurSolver::BlockKrylovSchurSolver(
     ::fasteig_problem& problem,
@@ -96,15 +24,13 @@ BlockKrylovSchurSolver::BlockKrylovSchurSolver(
     : fasteig_solver(problem, options) {}
 
 FASTEIG_INT BlockKrylovSchurSolver::solve() {
-  std::shared_ptr<core::Executor> exec = problem_.executor(options_);
-  std::unique_ptr<core::LinearOperator> op = problem_.make_linear_operator(options_, *exec);
-  const int n = static_cast<int>(eigvecs_.rows());
-  const int nev = static_cast<int>(options_.nev());
-  const int maxiter = static_cast<int>(options_.maxiter());
-  const double tol = options_.tol();
+  const FASTEIG_INT n = eigvecs_.rows();
+  const FASTEIG_INT nev = options_.nev();
+  const FASTEIG_INT maxiter = options_.maxiter();  // number of restart cycles
+  const FASTEIG_DOUBLE tol = options_.tol();
+  const FASTEIG_INT print_every = options_.print_every();
   const int verbosity = options_.verbosity();
-  const int print_every = static_cast<int>(options_.print_every());
-  const std::string which = lower_copy(options_.which());
+  const std::string which = core::lanczos_lower_copy(options_.which());
 
   if (n <= 0) throw std::invalid_argument("BlockKrylovSchurSolver: n must be > 0.");
   if (nev <= 0 || nev > n) {
@@ -113,150 +39,146 @@ FASTEIG_INT BlockKrylovSchurSolver::solve() {
   if (maxiter <= 0) {
     throw std::invalid_argument("BlockKrylovSchurSolver: maxiter must be > 0.");
   }
-  if (problem_.bmatrix() != nullptr) {
+  if (problem_.is_generalized()) {
     throw std::invalid_argument(
-        "BlockKrylovSchurSolver: generalized eigenproblems are not supported.");
+        "BlockKrylovSchurSolver: generalized eigenproblems are not supported yet.");
   }
-  if (which != "sr" && which != "lr" && which != "sm" &&
-      which != "lm" && which != "be") {
-    throw std::invalid_argument(
-        "BlockKrylovSchurSolver: invalid which option (use SR/LR/SM/LM/BE).");
-  }
+  core::validate_lanczos_which(
+      which, /*allow_sai=*/false, "BlockKrylovSchurSolver");
 
-  // bks.m uses the number of requested eigenpairs as its block width.  Its
-  // nblks argument therefore corresponds to maxdim / nev in this interface.
-  const int requested_dim =
+  // This follows the original bks.m convention: the requested eigenpair count
+  // is also the block width. maxdim controls the restarted Krylov dimension.
+  const FASTEIG_INT block_size = nev;
+  const FASTEIG_INT requested_dim =
       (options_.maxdim() > 0)
-          ? static_cast<int>(options_.maxdim())
-          : std::max(2 * nev, 20);
-  if (requested_dim < 2 * nev) {
+          ? options_.maxdim()
+          : std::max<FASTEIG_INT>(2 * nev, 20);
+  if (requested_dim < 2 * block_size) {
     throw std::invalid_argument(
         "BlockKrylovSchurSolver: maxdim must be at least 2*nev.");
   }
 
-  const int block_count = std::min(requested_dim / nev, n / nev);
+  const FASTEIG_INT block_count =
+      std::min<FASTEIG_INT>(requested_dim / block_size, n / block_size);
   if (block_count < 2) {
     throw std::invalid_argument(
         "BlockKrylovSchurSolver: matrix dimension must accommodate at least "
         "two nev-sized blocks.");
   }
-  const int cycle_dim = block_count * nev;
+  const FASTEIG_INT cycle_dim = block_count * block_size;
+  const FASTEIG_INT projection_dim = cycle_dim + block_size;
 
-  MatrixXd V0(n, nev);
-  if (options_.v0().size() > 0) {
-    if (options_.v0().rows() != n || options_.v0().cols() < nev) {
-      throw std::invalid_argument(
-          "BlockKrylovSchurSolver: v0 must have at least nev columns and n rows.");
-    }
-    V0 = options_.v0().leftCols(nev);
-  } else {
-    const unsigned int base_seed = options_.seed().value_or(1u);
-    V0 = exec->create_random_multivector(n, nev, base_seed)->copy_to_host();
-  }
-
-  // One extra basis block holds the factor Q_F in F = Q_F*beta.  This is the
-  // F returned by blocklan/expand_bklan in the MATLAB implementation.
-  MatrixXd basis(n, cycle_dim + nev);
-  MatrixXd projected(cycle_dim + nev, cycle_dim + nev);
-  MatrixXd beta(nev, nev);
-  basis.setZero();
-  projected.setZero();
-  beta.setZero();
-
-  build_block_krylov_cycle(*op, *exec, V0, 0, block_count, basis, projected, beta);
-
-  std::ostream* log = (print_every > 0) ? problem_.log_stream() : nullptr;
   fasteig_logger stdout_logger;
   if (verbosity >= 2) stdout_logger.attach(&std::cout);
+  fasteig_logger* log_logger =
+      (print_every > 0 && problem_.log_stream()) ? &problem_.logger() : nullptr;
+  fasteig_logger* console_logger = (verbosity >= 2) ? &stdout_logger : nullptr;
 
-  VectorXd final_values(nev);
-  MatrixXd final_vectors(n, nev);
-  VectorXd final_residuals(nev);
-  int final_iteration = 0;
+  // Executor-owned state. CPU and CUDA share the algorithm below; vectors,
+  // block operations, QR, and projected storage are backend implementations.
+  std::shared_ptr<core::Executor> exec = problem_.executor(options_);
+  std::unique_ptr<core::LinearOperator> op =
+      problem_.make_linear_operator(options_, *exec);
+  const unsigned int base_seed = options_.seed().value_or(1u);
+  if (options_.v0().size() > 0 &&
+      (options_.v0().rows() != n || options_.v0().cols() < block_size)) {
+    throw std::invalid_argument(
+        "BlockKrylovSchurSolver: v0 must have n rows and at least nev columns.");
+  }
+  auto initial_block =
+      (options_.v0().size() > 0)
+          ? exec->create_multivector(
+                options_.v0().leftCols(static_cast<int>(block_size)))
+          : exec->create_random_multivector(n, block_size, base_seed);
+  auto basis = exec->create_multivector(n, projection_dim);
+  auto projection =
+      core::make_lanczos_workspace(*exec, n, projection_dim, nev);
+  core::BlockKrylovSubspace subspace(*op, *initial_block, *basis);
+
+  // Expand Q from first_block through the final active block. Q_block_count is
+  // the extra residual block used to estimate Ritz residuals.
+  auto expand_subspace = [&](FASTEIG_INT first_block) {
+    for (FASTEIG_INT block = first_block; block < block_count; ++block) {
+      // 1. Z = op * Q_block.
+      subspace.apply_operator_to_basis_block(block);
+
+      // 2. Orthogonalize Z against all active basis blocks.
+      subspace.orthogonalize_operator_block((block + 1) * block_size);
+
+      // 3. QR-factor the residual; its Q factor becomes Q_{block+1}.
+      subspace.qr_residual_block(block + 1);
+
+      // 4. Store the diagonal and coupling blocks of the projection.
+      projection->record_block_step(block, block_size,
+                                    subspace.diagonal_block(),
+                                    subspace.coupling_block());
+    }
+  };
+
+  subspace.initialize_basis_block();
+  expand_subspace(0);
+
+  core::LanczosSnapshot final;
+  FASTEIG_INT final_iteration = 0;
   bool last_was_printed = false;
 
-  for (int iteration = 1; iteration <= maxiter; ++iteration) {
-    projected.topLeftCorner(cycle_dim, cycle_dim) =
-        0.5 * (projected.topLeftCorner(cycle_dim, cycle_dim) +
-               projected.topLeftCorner(cycle_dim, cycle_dim).transpose().eval());
-
-    Eigen::SelfAdjointEigenSolver<MatrixXd> eigensolver(
-        projected.topLeftCorner(cycle_dim, cycle_dim));
-    if (eigensolver.info() != Eigen::Success) {
-      throw std::runtime_error(
-          "BlockKrylovSchurSolver: projected eigensolve failed.");
-    }
-
-    const VectorXd& all_values = eigensolver.eigenvalues();
-    const MatrixXd& all_vectors = eigensolver.eigenvectors();
-    const std::vector<size_t> indices = selected_indices(all_values, which);
-
-    MatrixXd selected(cycle_dim, nev);
-    for (int j = 0; j < nev; ++j) {
-      const int index = static_cast<int>(indices[static_cast<size_t>(j)]);
-      final_values(j) = all_values(index);
-      selected.col(j) = all_vectors.col(index);
-    }
-
-    final_vectors.noalias() = basis.leftCols(cycle_dim) * selected;
-    const MatrixXd coupling = beta * selected.bottomRows(nev);
-    for (int j = 0; j < nev; ++j) {
-      final_residuals(j) =
-          coupling.col(j).norm() / (1.0 + std::abs(final_values(j)));
-    }
+  for (FASTEIG_INT iteration = 1; iteration <= maxiter; ++iteration) {
+    // Rayleigh--Ritz extraction from the block projected matrix. CUDA keeps
+    // the projected matrix and dense eigensolve in its workspace.
+    core::LanczosSnapshot snapshot = projection->compute_block_snapshot(
+        block_count, block_size, nev, which, /*need_vectors=*/true,
+        "BlockKrylovSchurSolver");
     final_iteration = iteration;
 
     const bool do_progress =
-        print_every > 0 && (iteration % print_every == 0);
+        (print_every > 0) && ((iteration % print_every) == 0);
     if (do_progress) {
-      if (log) {
-        problem_.logger().print_convergence_data(
-            final_values, final_residuals, iteration);
-      }
-      if (verbosity >= 2) {
-        stdout_logger.print_convergence_data(
-            final_values, final_residuals, iteration);
-      }
+      core::lanczos_emit_snapshot(
+          snapshot, iteration, log_logger, console_logger);
     }
     last_was_printed = do_progress;
 
-    const bool converged = final_residuals.maxCoeff() < tol;
-    if (converged || iteration == maxiter) break;
+    const bool converged =
+        snapshot.rel_res.size() > 0 && snapshot.rel_res.maxCoeff() < tol;
+    if (converged || iteration == maxiter) {
+      final = std::move(snapshot);
+      break;
+    }
 
-    // Krylov--Schur restart from bks.m:
-    //   V_1 = V*C, V_2 = qr(F), T(1:2p,1:p) = [D; beta*C_last].
-    // The executor-aware block subspace then performs the expand_bklan portion
-    // of the cycle.
-    const MatrixXd residual_basis = basis.middleCols(cycle_dim, nev);
-    basis.setZero();
-    basis.leftCols(nev) = final_vectors;
-    basis.middleCols(nev, nev) = residual_basis;
+    // Block Krylov--Schur restart:
+    //   Q_0 <- Q*C,  Q_1 <- Q_F,
+    //   T(0,0) <- diag(theta),  T(1,0) <- beta*C_last.
+    // Large basis transformations remain on the selected executor; only the
+    // small projected coefficients are host-visible.
+    const MatrixXd restart_coupling =
+        subspace.coupling_block() *
+        snapshot.Csel.bottomRows(static_cast<int>(block_size));
+    subspace.restart_with_ritz_block(
+        cycle_dim, snapshot.Csel, block_count);
+    projection->prepare_block_krylov_schur_restart(
+        block_size, snapshot.lam, restart_coupling,
+        "BlockKrylovSchurSolver");
 
-    projected.setZero();
-    projected.topLeftCorner(nev, nev) = final_values.asDiagonal();
-    projected.block(nev, 0, nev, nev) = coupling;
-    projected.block(0, nev, nev, nev) = coupling.transpose();
-
-    build_block_krylov_cycle(*op, *exec, basis.leftCols(nev), 1, block_count,
-                             basis, projected, beta);
+    // Q_0 and Q_1 are supplied by the restart, so expansion resumes at Q_1.
+    expand_subspace(1);
   }
 
-  eigvals_ = final_values;
-  eigvecs_ = final_vectors;
-
+  if (final.lam.size() == 0 || final.Csel.size() == 0) {
+    throw std::logic_error(
+        "BlockKrylovSchurSolver: solve terminated without a final Ritz snapshot.");
+  }
   if (print_every > 0 && !last_was_printed) {
-    if (log) {
-      problem_.logger().print_convergence_data(
-          final_values, final_residuals, final_iteration);
-    }
-    if (verbosity >= 2) {
-      stdout_logger.print_convergence_data(
-          final_values, final_residuals, final_iteration);
-    }
+    core::lanczos_emit_snapshot(
+        final, final_iteration, log_logger, console_logger);
   }
 
-  compute_final_residual_norms();
-  set_iterations(final_iteration);
+  // CUDA performs the basis-times-coefficient GEMM and residual checks on
+  // device, then returns only the requested user-facing eigenpairs.
+  projection->finalize_eigenpairs(
+      *op, *basis, cycle_dim, final, which, options_.shift(),
+      eigvals_, eigvecs_, resnrms_);
+
+  set_iterations(static_cast<long long>(final_iteration));
   return status_;
 }
 

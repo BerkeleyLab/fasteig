@@ -2,12 +2,15 @@ Type `make` to generate the CPU executable `runfasteig_cpu`.
 With `USE_CUDA=1`, `runfasteig_gpu` is also built.
 CPU/GPU executable behavior:
 - Use the same input deck for CPU and GPU runs.
-- Keep `solver Lanczos` in the input deck.
-- Run `./runfasteig_cpu inputfile` to use the CPU Lanczos backend.
-- Run `./runfasteig_gpu inputfile` to use the CUDA Lanczos backend.
-- The CUDA backend currently supports stored MatrixMarket/CSR Lanczos problems.
-  Generalized problems (`bmatrix`) and matrix-free Lanczos should be run with
-  `runfasteig_cpu` for now. CUDA `which SAI` requires NVIDIA cuDSS.
+- Keep `solver Lanczos`, `BlockLanczos`, `KrylovSchur`, or
+  `BlockKrylovSchur` in the input deck.
+- Run `./runfasteig_cpu inputfile` to select the CPU executor.
+- Run `./runfasteig_gpu inputfile` to select the CUDA executor.
+- These CUDA paths currently support stored MatrixMarket/CSR standard
+  eigenproblems. Generalized Krylov--Schur and matrix-free problems should use
+  `runfasteig_cpu` for now. CUDA `which SAI` is supported by scalar Lanczos and
+  Krylov--Schur when NVIDIA cuDSS is available; the block methods do not support
+  `SAI`.
 macOS quick start (local build)
 1) Install Eigen headers (Homebrew):
    `brew install eigen`
