@@ -161,6 +161,26 @@ void CudaMultiVector::copy_column_from(FASTEIG_INT col, const Vector& src) {
   }
 }
 
+void CudaMultiVector::copy_column_to(FASTEIG_INT col, Vector& dst) const {
+  if (col < 0 || col >= cols_) {
+    throw std::invalid_argument("CudaMultiVector::copy_column_to: column out of range.");
+  }
+  if (dst.size() != rows_ || &dst.executor() != &exec_) {
+    throw std::invalid_argument("CudaMultiVector::copy_column_to: destination mismatch.");
+  }
+  auto* cuda_dst = dynamic_cast<CudaVector*>(&dst);
+  if (!cuda_dst) {
+    throw std::invalid_argument("CudaMultiVector::copy_column_to: destination is not a CudaVector.");
+  }
+  if (rows_ == 0) return;
+
+  auto& context = cuda_executor_from(exec_, "CudaMultiVector::copy_column_to").context();
+  const double* d_col =
+      d_values_ + static_cast<std::size_t>(col) * static_cast<std::size_t>(rows_);
+  FASTEIG_CUBLAS_CHECK(cublasDcopy(context.cublas_handle(), static_cast<int>(rows_),
+                                   d_col, 1, cuda_dst->data(), 1));
+}
+
 VectorXd CudaMultiVector::copy_column_to_host(FASTEIG_INT col) const {
   if (col < 0 || col >= cols_) {
     throw std::invalid_argument("CudaMultiVector::copy_column_to_host: column out of range.");
@@ -331,6 +351,122 @@ void CudaMultiVector::right_multiply_active_columns(
                                    d_values_, static_cast<int>(rows_),
                                    d_coeffs.ptr, static_cast<int>(active_cols), &zero,
                                    cuda_result->d_values_, static_cast<int>(rows_)));
+}
+
+MatrixXd CudaMultiVector::transpose_multiply(
+    FASTEIG_INT active_cols,
+    const MultiVector& right,
+    FASTEIG_INT right_active_cols) const {
+  if (&right.executor() != &exec_ || right.rows() != rows_ ||
+      active_cols < 0 || active_cols > cols_ ||
+      right_active_cols < 0 || right_active_cols > right.cols()) {
+    throw std::invalid_argument(
+        "CudaMultiVector::transpose_multiply: dimension or executor mismatch.");
+  }
+  const auto* cuda_right = dynamic_cast<const CudaMultiVector*>(&right);
+  if (!cuda_right) {
+    throw std::invalid_argument(
+        "CudaMultiVector::transpose_multiply: right is not a CudaMultiVector.");
+  }
+
+  MatrixXd result(static_cast<int>(active_cols), static_cast<int>(right_active_cols));
+  if (active_cols == 0 || right_active_cols == 0) return result;
+
+  struct DeviceBuffer {
+    double* ptr = nullptr;
+    ~DeviceBuffer() {
+      if (ptr) cudaFree(ptr);
+    }
+  } d_result;
+
+  const std::size_t count = static_cast<std::size_t>(active_cols) *
+                            static_cast<std::size_t>(right_active_cols);
+  FASTEIG_CUDA_CHECK(cudaMalloc(&d_result.ptr, count * sizeof(double)));
+
+  auto& context =
+      cuda_executor_from(exec_, "CudaMultiVector::transpose_multiply").context();
+  const double one = 1.0;
+  const double zero = 0.0;
+  FASTEIG_CUBLAS_CHECK(cublasDgemm(
+      context.cublas_handle(), CUBLAS_OP_T, CUBLAS_OP_N,
+      static_cast<int>(active_cols), static_cast<int>(right_active_cols),
+      static_cast<int>(rows_), &one,
+      d_values_, static_cast<int>(rows_),
+      cuda_right->d_values_, static_cast<int>(rows_),
+      &zero, d_result.ptr, static_cast<int>(active_cols)));
+  FASTEIG_CUDA_CHECK(cudaMemcpyAsync(
+      result.data(), d_result.ptr, count * sizeof(double),
+      cudaMemcpyDeviceToHost, context.stream()));
+  FASTEIG_CUDA_CHECK(cudaStreamSynchronize(context.stream()));
+  return result;
+}
+
+void CudaMultiVector::add_scaled_columns(
+    const MultiVector& x,
+    const Eigen::Ref<const VectorXd>& scales) {
+  if (&x.executor() != &exec_ || x.rows() != rows_ || x.cols() != cols_ ||
+      scales.size() != cols_) {
+    throw std::invalid_argument(
+        "CudaMultiVector::add_scaled_columns: dimension or executor mismatch.");
+  }
+  const auto* cuda_x = dynamic_cast<const CudaMultiVector*>(&x);
+  if (!cuda_x) {
+    throw std::invalid_argument(
+        "CudaMultiVector::add_scaled_columns: x is not a CudaMultiVector.");
+  }
+
+  auto& context =
+      cuda_executor_from(exec_, "CudaMultiVector::add_scaled_columns").context();
+  for (FASTEIG_INT j = 0; j < cols_; ++j) {
+    const double alpha = scales(static_cast<int>(j));
+    const std::size_t offset =
+        static_cast<std::size_t>(j) * static_cast<std::size_t>(rows_);
+    FASTEIG_CUBLAS_CHECK(cublasDaxpy(
+        context.cublas_handle(), static_cast<int>(rows_), &alpha,
+        cuda_x->d_values_ + offset, 1, d_values_ + offset, 1));
+  }
+}
+
+VectorXd CudaMultiVector::column_norms() const {
+  VectorXd norms(static_cast<int>(cols_));
+  if (cols_ == 0) return norms;
+
+  struct DeviceBuffer {
+    double* ptr = nullptr;
+    ~DeviceBuffer() {
+      if (ptr) cudaFree(ptr);
+    }
+  } d_norms;
+  FASTEIG_CUDA_CHECK(
+      cudaMalloc(&d_norms.ptr, static_cast<std::size_t>(cols_) * sizeof(double)));
+
+  auto& context = cuda_executor_from(exec_, "CudaMultiVector::column_norms").context();
+  cublasPointerMode_t previous_mode = CUBLAS_POINTER_MODE_HOST;
+  FASTEIG_CUBLAS_CHECK(
+      cublasGetPointerMode(context.cublas_handle(), &previous_mode));
+  FASTEIG_CUBLAS_CHECK(
+      cublasSetPointerMode(context.cublas_handle(), CUBLAS_POINTER_MODE_DEVICE));
+  try {
+    for (FASTEIG_INT j = 0; j < cols_; ++j) {
+      const std::size_t offset =
+          static_cast<std::size_t>(j) * static_cast<std::size_t>(rows_);
+      FASTEIG_CUBLAS_CHECK(cublasDnrm2(
+          context.cublas_handle(), static_cast<int>(rows_),
+          d_values_ + offset, 1, d_norms.ptr + j));
+    }
+    FASTEIG_CUBLAS_CHECK(
+        cublasSetPointerMode(context.cublas_handle(), previous_mode));
+  } catch (...) {
+    (void)cublasSetPointerMode(context.cublas_handle(), previous_mode);
+    throw;
+  }
+
+  FASTEIG_CUDA_CHECK(cudaMemcpyAsync(
+      norms.data(), d_norms.ptr,
+      static_cast<std::size_t>(cols_) * sizeof(double),
+      cudaMemcpyDeviceToHost, context.stream()));
+  FASTEIG_CUDA_CHECK(cudaStreamSynchronize(context.stream()));
+  return norms;
 }
 
 void CudaMultiVector::orthogonalize_active_columns_device_coeffs(FASTEIG_INT active_cols,

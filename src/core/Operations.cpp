@@ -61,6 +61,11 @@ void copy_column_from(MultiVector& X, FASTEIG_INT col, const Vector& x) {
   X.copy_column_from(col, x);
 }
 
+void copy_column_to(const MultiVector& X, FASTEIG_INT col, Vector& x) {
+  require_same_executor(X.executor(), x.executor(), "core::copy_column_to");
+  X.copy_column_to(col, x);
+}
+
 VectorXd copy_column_to_host(const MultiVector& X, FASTEIG_INT col) {
   return X.copy_column_to_host(col);
 }
@@ -121,6 +126,25 @@ void apply_block(const LinearOperator& op,
   require_same_executor(op.executor(), X.executor(), "core::apply_block(op,X)");
   require_same_executor(op.executor(), Y.executor(), "core::apply_block(op,Y)");
   op.apply_block(X, first_col, block_size, Y, alpha, beta);
+}
+
+MatrixXd transpose_multiply(const MultiVector& left,
+                            FASTEIG_INT left_active_cols,
+                            const MultiVector& right,
+                            FASTEIG_INT right_active_cols) {
+  require_same_executor(left.executor(), right.executor(), "core::transpose_multiply");
+  return left.transpose_multiply(left_active_cols, right, right_active_cols);
+}
+
+void add_scaled_columns(const MultiVector& x,
+                        const Eigen::Ref<const VectorXd>& scales,
+                        MultiVector& y) {
+  require_same_executor(x.executor(), y.executor(), "core::add_scaled_columns");
+  y.add_scaled_columns(x, scales);
+}
+
+VectorXd column_norms(const MultiVector& x) {
+  return x.column_norms();
 }
 
 MatrixXd apply_to_host(const LinearOperator& op,

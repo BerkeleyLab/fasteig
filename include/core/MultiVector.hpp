@@ -28,6 +28,7 @@ public:
   virtual void set_zero() = 0;
   virtual void scale(double alpha) = 0;
   virtual void copy_column_from(FASTEIG_INT col, const Vector& src) = 0;
+  virtual void copy_column_to(FASTEIG_INT col, Vector& dst) const = 0;
   virtual VectorXd copy_column_to_host(FASTEIG_INT col) const = 0;
   virtual double column_dot(FASTEIG_INT col, const Vector& x) const = 0;
   virtual void column_axpy(double alpha, FASTEIG_INT col, Vector& y) const = 0;
@@ -44,6 +45,12 @@ public:
       FASTEIG_INT active_cols,
       const Eigen::Ref<const MatrixXd>& coeffs,
       MultiVector& result) const = 0;
+  virtual MatrixXd transpose_multiply(FASTEIG_INT active_cols,
+                                      const MultiVector& right,
+                                      FASTEIG_INT right_active_cols) const = 0;
+  virtual void add_scaled_columns(const MultiVector& x,
+                                  const Eigen::Ref<const VectorXd>& scales) = 0;
+  virtual VectorXd column_norms() const = 0;
 };
 
 class CpuMultiVector final : public MultiVector {
@@ -69,6 +76,7 @@ public:
   void set_zero() override { values_.setZero(); }
   void scale(double alpha) override { values_ *= alpha; }
   void copy_column_from(FASTEIG_INT col, const Vector& src) override;
+  void copy_column_to(FASTEIG_INT col, Vector& dst) const override;
   VectorXd copy_column_to_host(FASTEIG_INT col) const override;
   double column_dot(FASTEIG_INT col, const Vector& x) const override;
   void column_axpy(double alpha, FASTEIG_INT col, Vector& y) const override;
@@ -85,6 +93,12 @@ public:
       FASTEIG_INT active_cols,
       const Eigen::Ref<const MatrixXd>& coeffs,
       MultiVector& result) const override;
+  MatrixXd transpose_multiply(FASTEIG_INT active_cols,
+                              const MultiVector& right,
+                              FASTEIG_INT right_active_cols) const override;
+  void add_scaled_columns(const MultiVector& x,
+                          const Eigen::Ref<const VectorXd>& scales) override;
+  VectorXd column_norms() const override;
 
   MatrixXd& values() noexcept { return values_; }
   const MatrixXd& values() const noexcept { return values_; }

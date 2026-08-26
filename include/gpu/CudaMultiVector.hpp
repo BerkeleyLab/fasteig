@@ -30,6 +30,7 @@ public:
   void set_zero() override;
   void scale(double alpha) override;
   void copy_column_from(FASTEIG_INT col, const Vector& src) override;
+  void copy_column_to(FASTEIG_INT col, Vector& dst) const override;
   VectorXd copy_column_to_host(FASTEIG_INT col) const override;
   double column_dot(FASTEIG_INT col, const Vector& x) const override;
   void column_axpy(double alpha, FASTEIG_INT col, Vector& y) const override;
@@ -46,6 +47,12 @@ public:
       FASTEIG_INT active_cols,
       const Eigen::Ref<const MatrixXd>& coeffs,
       MultiVector& result) const override;
+  MatrixXd transpose_multiply(FASTEIG_INT active_cols,
+                              const MultiVector& right,
+                              FASTEIG_INT right_active_cols) const override;
+  void add_scaled_columns(const MultiVector& x,
+                          const Eigen::Ref<const VectorXd>& scales) override;
+  VectorXd column_norms() const override;
 
   void orthogonalize_active_columns_device_coeffs(FASTEIG_INT active_cols,
                                                   const Vector& source,

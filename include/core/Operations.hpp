@@ -20,6 +20,7 @@ void copy(const MultiVector& x, MultiVector& y);
 void set_zero(MultiVector& x);
 void scal(double alpha, MultiVector& x);
 void copy_column_from(MultiVector& X, FASTEIG_INT col, const Vector& x);
+void copy_column_to(const MultiVector& X, FASTEIG_INT col, Vector& x);
 VectorXd copy_column_to_host(const MultiVector& X, FASTEIG_INT col);
 double column_dot(const MultiVector& X, FASTEIG_INT col, const Vector& x);
 void column_axpy(double alpha, const MultiVector& X, FASTEIG_INT col, Vector& y);
@@ -51,6 +52,15 @@ void apply_block(const LinearOperator& op,
                  MultiVector& Y,
                  double alpha = 1.0,
                  double beta = 0.0);
+
+MatrixXd transpose_multiply(const MultiVector& left,
+                            FASTEIG_INT left_active_cols,
+                            const MultiVector& right,
+                            FASTEIG_INT right_active_cols);
+void add_scaled_columns(const MultiVector& x,
+                        const Eigen::Ref<const VectorXd>& scales,
+                        MultiVector& y);
+VectorXd column_norms(const MultiVector& x);
 
 MatrixXd apply_to_host(const LinearOperator& op,
                        const Eigen::Ref<const MatrixXd>& X,

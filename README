@@ -30,11 +30,12 @@ deck. Keep the solver name in the input file and select the backend by
 executable, for example:
 ./runfasteig_cpu  SiO.input
 ./runfasteig_gpu  SiO.input
-The GPU executable dispatches `Lanczos`, `BlockLanczos`, `KrylovSchur`, and
-`BlockKrylovSchur` through the CUDA executor. These CUDA paths currently support
-standard stored-matrix problems; generalized Krylov--Schur remains host-only.
+The GPU executable dispatches `Lanczos`, `BlockLanczos`, `KrylovSchur`,
+`BlockKrylovSchur`, and `Davidson` through the CUDA executor. These CUDA
+paths currently support standard stored-matrix problems; generalized
+Krylov--Schur remains host-only.
 CUDA `which SAI` is available for scalar Lanczos and Krylov--Schur and requires
-NVIDIA cuDSS. The block methods do not support `SAI`.
+NVIDIA cuDSS. The block methods and Davidson do not support `SAI`.
 ### Optional project-space cuDSS install
 If your system does not provide a cuDSS module, install cuDSS into the checkout:
 ```

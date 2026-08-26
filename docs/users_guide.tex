@@ -245,10 +245,11 @@ make -C examples MAKEINC=../make.inc.local USE_CUDA=1
 \end{lstlisting}
 
 This creates both \code{runfasteig\_cpu} and \code{runfasteig\_gpu}.  The GPU
-driver selects a CUDA executor for \code{solver Lanczos} and
-\code{solver BlockLanczos}.  Other solver names in the GPU executable continue
-to use their CPU implementations, so use \code{runfasteig\_cpu} for clarity
-when selecting them.
+driver selects a CUDA executor for \code{solver Lanczos},
+\code{solver BlockLanczos}, \code{solver KrylovSchur},
+\code{solver BlockKrylovSchur}, and \code{solver Davidson}.  Other solver names
+in the GPU executable continue to use their CPU implementations, so use
+\code{runfasteig\_cpu} for clarity when selecting them.
 
 The CUDA backend requires a matrix stored in one of FASTEIG's input formats.
 Matrix-free operators are CPU-only in the current driver.  Generalized
@@ -409,8 +410,10 @@ family accepts \code{SR}, \code{LR}, \code{SM}, \code{LM}, and \code{BE}; scalar
 Lanczos also accepts \code{SAI}.  \code{KrylovSchur} supports standard and
 generalized problems, but generalized \code{SAI} is rejected.  The block
 Krylov--Schur implementation does not support generalized problems or
-\code{SAI}.  Chebyshev filtering is designed for an end of the spectrum; the
-implementation reverses the operator for \code{LR}/\code{LM}.
+\code{SAI}.  Davidson accepts \code{SR}, \code{LR}, \code{SM}, \code{LM}, and
+\code{BE} for standard problems, but not \code{SAI}.  Chebyshev filtering is
+designed for an end of the spectrum; the implementation reverses the operator
+for \code{LR}/\code{LM}.
 
 Use \code{SAI} to find eigenvalues near \code{shift}.  It incurs a sparse
 factorization setup cost and needs a stored matrix.  The CPU backend reports
@@ -459,7 +462,8 @@ MPI ranks unless each rank is intentionally running an independent problem.
 \section{Running on NVIDIA GPUs}
 
 Use the same input deck and select the backend with the executable name.  Keep
-\code{solver Lanczos} (or \code{solver BlockLanczos}) in the deck:
+a CUDA-enabled solver name such as \code{solver Lanczos},
+\code{solver BlockLanczos}, or \code{solver Davidson} in the deck:
 
 \begin{lstlisting}
 cd examples
@@ -494,9 +498,9 @@ srun -n 1 -c 16 --gpus-per-task=1 --gpu-bind=single:1 \
 \end{lstlisting}
 
 GPU work is not selected merely by compiling with CUDA: run the
-\code{runfasteig\_gpu} executable and choose Lanczos or BlockLanczos.  The
-current CUDA executor accepts stored CSR data derived from the input matrix;
-it does not accept the matrix-free callback path.
+\code{runfasteig\_gpu} executable and choose a CUDA-enabled solver.  The current
+CUDA executor accepts stored CSR data derived from the input matrix; it does
+not accept the matrix-free callback path.
 
 \section{Verification}
 
@@ -589,3 +593,4 @@ pdflatex -output-directory=docs docs/fasteig_user_guide.tex
 \end{lstlisting}
 
 \end{document}
+

@@ -67,6 +67,20 @@ void CpuMultiVector::copy_column_from(FASTEIG_INT col, const Vector& src) {
   values_.col(static_cast<int>(col)) = cpu_src->values();
 }
 
+void CpuMultiVector::copy_column_to(FASTEIG_INT col, Vector& dst) const {
+  if (col < 0 || col >= cols()) {
+    throw std::invalid_argument("CpuMultiVector::copy_column_to: column out of range.");
+  }
+  if (dst.size() != rows() || &dst.executor() != &exec_) {
+    throw std::invalid_argument("CpuMultiVector::copy_column_to: destination mismatch.");
+  }
+  auto* cpu_dst = dynamic_cast<CpuVector*>(&dst);
+  if (!cpu_dst) {
+    throw std::invalid_argument("CpuMultiVector::copy_column_to: destination is not a CpuVector.");
+  }
+  cpu_dst->values() = values_.col(static_cast<int>(col));
+}
+
 VectorXd CpuMultiVector::copy_column_to_host(FASTEIG_INT col) const {
   if (col < 0 || col >= cols()) {
     throw std::invalid_argument("CpuMultiVector::copy_column_to_host: column out of range.");
@@ -192,6 +206,42 @@ void CpuMultiVector::right_multiply_active_columns(
   }
   cpu_result->values_.noalias() =
       values_.leftCols(static_cast<int>(active_cols)) * coeffs;
+}
+
+MatrixXd CpuMultiVector::transpose_multiply(FASTEIG_INT active_cols,
+                                            const MultiVector& right,
+                                            FASTEIG_INT right_active_cols) const {
+  if (&right.executor() != &exec_ || right.rows() != rows() ||
+      active_cols < 0 || active_cols > cols() ||
+      right_active_cols < 0 || right_active_cols > right.cols()) {
+    throw std::invalid_argument("CpuMultiVector::transpose_multiply: dimension or executor mismatch.");
+  }
+  const auto* cpu_right = dynamic_cast<const CpuMultiVector*>(&right);
+  if (!cpu_right) {
+    throw std::invalid_argument("CpuMultiVector::transpose_multiply: right is not a CpuMultiVector.");
+  }
+  return values_.leftCols(static_cast<int>(active_cols)).transpose() *
+         cpu_right->values_.leftCols(static_cast<int>(right_active_cols));
+}
+
+void CpuMultiVector::add_scaled_columns(
+    const MultiVector& x,
+    const Eigen::Ref<const VectorXd>& scales) {
+  if (&x.executor() != &exec_ || x.rows() != rows() || x.cols() != cols() ||
+      scales.size() != cols()) {
+    throw std::invalid_argument("CpuMultiVector::add_scaled_columns: dimension or executor mismatch.");
+  }
+  const auto* cpu_x = dynamic_cast<const CpuMultiVector*>(&x);
+  if (!cpu_x) {
+    throw std::invalid_argument("CpuMultiVector::add_scaled_columns: x is not a CpuMultiVector.");
+  }
+  for (int j = 0; j < values_.cols(); ++j) {
+    values_.col(j).noalias() += scales(j) * cpu_x->values_.col(j);
+  }
+}
+
+VectorXd CpuMultiVector::column_norms() const {
+  return values_.colwise().norm().transpose();
 }
 
 }  // namespace core

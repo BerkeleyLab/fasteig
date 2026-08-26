@@ -1,5 +1,7 @@
 #include "core/RitzExtraction.hpp"
 
+#include "core/MultiVector.hpp"
+#include "core/Operations.hpp"
 #include "fasteig_logger.hpp"
 #include "fasteig_solver.hpp"
 
@@ -11,6 +13,84 @@
 
 namespace fasteig {
 namespace core {
+
+ProjectedRitzPairs extract_projected_ritz_pairs(
+    const MatrixXd& projected_matrix,
+    const MultiVector& basis,
+    const MultiVector& operator_basis,
+    FASTEIG_INT active_cols,
+    FASTEIG_INT requested,
+    const std::string& which,
+    MultiVector& ritz_vectors,
+    MultiVector& operator_ritz_vectors,
+    MultiVector& residuals,
+    const char* solver_name) {
+  const std::string where = solver_name ? solver_name : "extract_projected_ritz_pairs";
+  validate_lanczos_which(which, /*allow_sai=*/false, where.c_str());
+
+  if (active_cols <= 0 || requested <= 0 || requested > active_cols) {
+    throw std::invalid_argument(where + ": invalid active/requested Ritz dimensions.");
+  }
+  if (projected_matrix.rows() < active_cols || projected_matrix.cols() < active_cols) {
+    throw std::invalid_argument(where + ": projected matrix is too small.");
+  }
+  if (&basis.executor() != &operator_basis.executor() ||
+      &basis.executor() != &ritz_vectors.executor() ||
+      &basis.executor() != &operator_ritz_vectors.executor() ||
+      &basis.executor() != &residuals.executor()) {
+    throw std::invalid_argument(where + ": Ritz extraction executor mismatch.");
+  }
+  if (basis.rows() != operator_basis.rows() ||
+      basis.rows() != ritz_vectors.rows() ||
+      basis.rows() != operator_ritz_vectors.rows() ||
+      basis.rows() != residuals.rows() ||
+      basis.cols() < active_cols || operator_basis.cols() < active_cols ||
+      ritz_vectors.cols() != requested ||
+      operator_ritz_vectors.cols() != requested || residuals.cols() != requested) {
+    throw std::invalid_argument(where + ": Ritz extraction multivector dimension mismatch.");
+  }
+
+  const int m = static_cast<int>(active_cols);
+  MatrixXd projected = projected_matrix.topLeftCorner(m, m);
+  projected = 0.5 * (projected + projected.transpose());
+  Eigen::SelfAdjointEigenSolver<MatrixXd> eigensolver(projected);
+  if (eigensolver.info() != Eigen::Success) {
+    throw std::runtime_error(where + ": projected eigensolve failed.");
+  }
+
+  const VectorXd all_values = eigensolver.eigenvalues();
+  const MatrixXd all_coefficients = eigensolver.eigenvectors();
+  const std::vector<size_t> indices = lanczos_select_ritz_indices(all_values, which);
+
+  ProjectedRitzPairs result;
+  result.values.resize(static_cast<int>(requested));
+  result.coefficients.resize(m, static_cast<int>(requested));
+  for (FASTEIG_INT j = 0; j < requested; ++j) {
+    const int selected = static_cast<int>(indices[static_cast<std::size_t>(j)]);
+    result.values(static_cast<int>(j)) = all_values(selected);
+    result.coefficients.col(static_cast<int>(j)) = all_coefficients.col(selected);
+  }
+
+  basis.right_multiply_active_columns(active_cols, result.coefficients, ritz_vectors);
+  operator_basis.right_multiply_active_columns(
+      active_cols, result.coefficients, operator_ritz_vectors);
+  residuals.copy_from(operator_ritz_vectors);
+  add_scaled_columns(ritz_vectors, -result.values, residuals);
+
+  const VectorXd residual_norms = column_norms(residuals);
+  const VectorXd ritz_norms = column_norms(ritz_vectors);
+  result.relative_residuals.resize(static_cast<int>(requested));
+  for (FASTEIG_INT j = 0; j < requested; ++j) {
+    const double denominator =
+        (1.0 + std::abs(result.values(static_cast<int>(j)))) *
+        ritz_norms(static_cast<int>(j));
+    result.relative_residuals(static_cast<int>(j)) =
+        (denominator > 0.0)
+            ? residual_norms(static_cast<int>(j)) / denominator
+            : residual_norms(static_cast<int>(j));
+  }
+  return result;
+}
 
 std::string lanczos_lower_copy(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(),

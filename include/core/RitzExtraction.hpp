@@ -10,11 +10,31 @@ class fasteig_logger;
 namespace fasteig {
 namespace core {
 
+class MultiVector;
+
 struct LanczosSnapshot {
   VectorXd lam;
   VectorXd rel_res;
   MatrixXd Csel;
 };
+
+struct ProjectedRitzPairs {
+  VectorXd values;
+  VectorXd relative_residuals;
+  MatrixXd coefficients;
+};
+
+ProjectedRitzPairs extract_projected_ritz_pairs(
+    const MatrixXd& projected_matrix,
+    const MultiVector& basis,
+    const MultiVector& operator_basis,
+    FASTEIG_INT active_cols,
+    FASTEIG_INT requested,
+    const std::string& which,
+    MultiVector& ritz_vectors,
+    MultiVector& operator_ritz_vectors,
+    MultiVector& residuals,
+    const char* solver_name);
 
 std::string lanczos_lower_copy(std::string s);
 

@@ -115,10 +115,11 @@ Code & Meaning & Practical interpretation \\
 
 Lanczos and standard Krylov--Schur implement all six codes.  Block Lanczos and
 Block Krylov--Schur implement \code{SR}, \code{LR}, \code{SM}, \code{LM}, and
-\code{BE}.  Davidson, LOBPCG, and Chebyshev are currently end-of-spectrum
-implementations: \code{LR} and \code{LM} are handled by applying the method to
-$-A$ and negating the reported eigenvalues; other non-high-end selections are
-treated as low-end computations rather than as general interior targeting.
+\code{BE}.  Davidson implements the same five non-SAI selections for standard
+problems.  LOBPCG and Chebyshev remain end-of-spectrum implementations:
+\code{LR} and \code{LM} are handled by applying the method to $-A$ and negating
+the reported eigenvalues; other non-high-end selections are treated as low-end
+computations rather than as general interior targeting.
 
 \subsection{Residuals and stopping tests}
 
@@ -169,7 +170,7 @@ Lanczos & A few extremal eigenpairs; simple, dependable baseline; interior pairs
 Block Lanczos & Clusters, multiple eigenvalues, or several pairs at once. & Native CPU/CUDA path for large basis state; small block coefficients are host-visible. & Unrestarted; no SAI or generalized problem. \\
 Krylov--Schur & Bounded-memory extremal solve; repeated restart cycles; SAI. & Standard problem has a native executor path. Generalized problem is host-only. & Standard subspace dimension is currently fixed internally; generalized SAI is unsupported. \\
 Block Krylov--Schur & Clustered eigenvalues with restarted block expansion. & Executor-aware but presently hybrid. & Block width is \code{nev}; no SAI or generalized problem. \\
-Davidson & Low or high extremal pairs when useful correction/preconditioning information is available. & Executor-aware matrix application; host dense state. & Current correction is the raw residual; no active preconditioner. \\
+Davidson & Extremal, magnitude-selected, or both-end pairs when useful correction/preconditioning information is available. & Native CPU/CUDA path for large trial-space state; small projected eigensolve is host-resident. & Standard problems only; current correction is the raw residual; no SAI or active preconditioner. \\
 LOBPCG & Several extremal pairs with a compact three-block trial space. & Executor-aware matrix application; host dense state. & Preconditioner hook is not active in the current solver. \\
 Chebyshev & Repeatedly improving an approximate low- or high-end invariant subspace. & Executor-aware matrix application; host filtering and dense state. & Filter degree and spectral bounds strongly affect behavior. \\
 SPPC & Hierarchical Hamiltonians with a useful leading principal problem. & Host-oriented through a legacy-operations adapter. & Specialized partition; requires \code{maxdim}=split size. \\
@@ -233,16 +234,16 @@ Block Lanczos & Basis blocks, operator/residual blocks, projected workspace. & S
 Standard Krylov--Schur & Basis, recurrence vectors, projected workspace and standard restart operations. & Progress data and final public results. \\
 Generalized Krylov--Schur & None of the large Krylov state is executor-backed. & $Q$, $BQ$, projected matrix, and $B$ solves. \\
 Block Krylov--Schur & Operator application can use the executor. & Cycle basis, projected matrix, restart, and eigensolve. \\
-Davidson, LOBPCG, Chebyshev & Operator application can use the executor. & Dense trial spaces, orthogonalization, projection, filtering state. \\
+Davidson & Trial basis, operator images, Ritz vectors, residuals, orthogonalization, and QR. & Small projected matrix/eigensolve, convergence scalars, and final public Eigen vectors. \\
+LOBPCG, Chebyshev & Operator application can use the executor. & Dense trial spaces, orthogonalization, projection, filtering state. \\
 SPPC, RMM-DIIS & Operator is adapted to host callbacks. & Algorithm state and correction equations. \\
 \bottomrule
 \end{longtable}
 \normalsize
 
 The example GPU executable currently selects the CUDA executor automatically
-only for \code{Lanczos} and \code{BlockLanczos}.  The standard Krylov--Schur
-library implementation is executor-aware, but the example driver does not yet
-dispatch that solver to CUDA.
+for \code{Lanczos}, \code{BlockLanczos}, standard \code{KrylovSchur},
+\code{BlockKrylovSchur}, and standard \code{Davidson}.
 
 \subsection{Krylov subspaces and matrix-free application}
 
@@ -609,16 +610,20 @@ for outer_cycle = 1, ..., maxiter
 end
 \end{lstlisting}
 
-The large trial matrices are host-resident.  Operator applications go through
-the executor-aware \code{LinearOperator}, so a CUDA operator can be called, but
-each new host block must cross the memory boundary.  In practice this path
-should be considered CPU/hybrid until the full Davidson state and correction
-preconditioner are moved into core executor objects.
+The large trial basis, operator images, Ritz vectors, correction blocks, and
+residuals reside in executor-owned \code{MultiVector} objects.  Matrix
+application, block Gram--Schmidt, QR, and Ritz-vector construction therefore
+run through the selected CPU or CUDA backend.  Only the small projected matrix,
+its dense eigensolve, convergence scalars, and final public Eigen vectors are
+host-resident.
 
 \code{maxblks} limits the number of correction blocks per outer cycle and
 therefore the peak basis size, approximately \code{maxblks}$\times\code{nev}$.
-The method handles the high end by applying the low-end algorithm to $-A$ for
-\code{LR}/\code{LM}.
+The method supports \code{SR}, \code{LR}, \code{SM}, \code{LM}, and \code{BE}
+by selecting the requested Ritz pairs from the projected spectrum.  Direct
+\code{SM} selection does not use shift-and-invert and may converge slowly for
+deep interior eigenvalues.  Davidson currently rejects \code{SAI} and
+generalized problems.
 
 \section{LOBPCG}
 \label{sec:lobpcg}
@@ -1007,3 +1012,4 @@ Computing,''
 \end{thebibliography}
 
 \end{document}
+

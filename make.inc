@@ -41,10 +41,46 @@ EIGEN = /global/common/cori/software/eigen3/3.3.3/include/eigen3
 USE_CUDA ?= 0
 CUDA_PATH ?= /opt/nvidia/hpc_sdk/Linux_x86_64/25.5
 CUDA_ARCH ?= 80
-NVCC ?= nvcc
-CUDA_INC = -I$(CUDA_PATH)/include -I$(CUDA_PATH)/cuda/include -I$(CUDA_PATH)/math_libs/include
-CUDA_LIBS = -L$(CUDA_PATH)/cuda/lib64 -L$(CUDA_PATH)/math_libs/lib64 \
-            -lcusparse -lcusolver -lcublas -lcudart
+
+# NVHPC installations contain versioned CUDA toolkits (for example, 11.8 and
+# 12.9 under HPC SDK 25.5).  Select one toolkit once and use its compiler,
+# headers, runtime, math libraries, and nvJitLink together.  Mixing the
+# unversioned math_libs symlink with a different nvcc/runtime can otherwise
+# produce unresolved __nvJitLink*_12_x symbols at link time.
+CUDA_VERSIONED_ROOTS := $(sort $(wildcard $(CUDA_PATH)/cuda/[0-9]*))
+CUDA_UNVERSIONED_ROOT := $(if $(wildcard $(CUDA_PATH)/bin/nvcc),$(CUDA_PATH),$(CUDA_PATH)/cuda)
+CUDA_TOOLKIT_ROOT ?= $(if $(strip $(CUDA_VERSIONED_ROOTS)),$(lastword $(CUDA_VERSIONED_ROOTS)),$(CUDA_UNVERSIONED_ROOT))
+CUDA_TOOLKIT_VERSION := $(notdir $(CUDA_TOOLKIT_ROOT))
+CUDA_VERSIONED_MATH_ROOT := $(CUDA_PATH)/math_libs/$(CUDA_TOOLKIT_VERSION)
+CUDA_UNVERSIONED_MATH_ROOT := $(if $(wildcard $(CUDA_PATH)/math_libs/include),$(CUDA_PATH)/math_libs,$(CUDA_TOOLKIT_ROOT))
+CUDA_MATH_ROOT ?= $(if $(wildcard $(CUDA_VERSIONED_MATH_ROOT)/include),$(CUDA_VERSIONED_MATH_ROOT),$(CUDA_UNVERSIONED_MATH_ROOT))
+
+CUDA_TOOLKIT_LIBDIR_MATCH := $(firstword \
+  $(foreach d,$(CUDA_TOOLKIT_ROOT)/targets/x86_64-linux/lib $(CUDA_TOOLKIT_ROOT)/lib64, \
+    $(if $(wildcard $(d)/libcudart.so*),$(d))))
+CUDA_TOOLKIT_LIBDIR ?= $(if $(strip $(CUDA_TOOLKIT_LIBDIR_MATCH)),$(CUDA_TOOLKIT_LIBDIR_MATCH),$(CUDA_TOOLKIT_ROOT)/lib64)
+CUDA_MATH_LIBDIR_MATCH := $(firstword \
+  $(foreach d,$(CUDA_MATH_ROOT)/lib64 $(CUDA_MATH_ROOT)/targets/x86_64-linux/lib, \
+    $(if $(wildcard $(d)/libcusparse.so*),$(d))))
+CUDA_MATH_LIBDIR ?= $(if $(strip $(CUDA_MATH_LIBDIR_MATCH)),$(CUDA_MATH_LIBDIR_MATCH),$(CUDA_MATH_ROOT)/lib64)
+
+NVCC ?= $(if $(wildcard $(CUDA_TOOLKIT_ROOT)/bin/nvcc),$(CUDA_TOOLKIT_ROOT)/bin/nvcc,nvcc)
+# FASTEIG's example driver is serial.  Linking CUDA builds with Cray's `CC`
+# wrapper unnecessarily injects CUDA-aware MPI/GTL libraries, whose CUDA major
+# version can differ from the toolkit selected above.  Use the matching GNU
+# host linker directly for the final serial executables.
+CUDA_LINKER ?= g++
+CUDA_INC = -I$(CUDA_PATH)/include -I$(CUDA_TOOLKIT_ROOT)/include -I$(CUDA_MATH_ROOT)/include
+
+CUDA_NVJITLINK_SONAME := $(wildcard $(CUDA_TOOLKIT_LIBDIR)/libnvJitLink.so)
+CUDA_NVJITLINK_VERSIONED := $(firstword $(wildcard $(CUDA_TOOLKIT_LIBDIR)/libnvJitLink.so.*))
+CUDA_NVJITLINK_LIB := $(if $(CUDA_NVJITLINK_SONAME),-lnvJitLink,$(if $(CUDA_NVJITLINK_VERSIONED),-l:$(notdir $(CUDA_NVJITLINK_VERSIONED)),))
+
+CUDA_LIBS = -L$(CUDA_MATH_LIBDIR) -L$(CUDA_TOOLKIT_LIBDIR) \
+            -Wl,-rpath,$(CUDA_MATH_LIBDIR) -Wl,-rpath,$(CUDA_TOOLKIT_LIBDIR) \
+            -Wl,-rpath-link,$(CUDA_MATH_LIBDIR) -Wl,-rpath-link,$(CUDA_TOOLKIT_LIBDIR) \
+            -Wl,--no-as-needed -lcusparse -lcusolver -lcublas \
+            $(CUDA_NVJITLINK_LIB) -lcudart
 CUDA_CXXFLAGS = -DUSE_CUDA $(CUDA_INC)
 CUDA_NVCCFLAGS = -std=c++17 -O3 -DUSE_CUDA -gencode arch=compute_$(CUDA_ARCH),code=sm_$(CUDA_ARCH) \
                  -I$(HOME)/include -I$(EIGEN) $(CUDA_INC)
