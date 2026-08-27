@@ -53,4 +53,6 @@ foreach(SOLVER ${SOLVERS})
     endforeach()
 endforeach()
 
-
+if(NOT TARGET runfasteig)
+    message(FATAL_ERROR "BUILD_TESTS requires BUILD_EXAMPLES=ON (runfasteig is the test driver).")
+endif()

@@ -1,5 +1,5 @@
-amatrix SiO.fei
-#amatrix ./Sparse_Matrices/SiO.mtx
+#amatrix SiO.fei
+amatrix /global/homes/t/thom13/Repos/fasteig/examples/Sparse_Matrices/SiO.mtx
 logfile SiO
 output_format text
 
