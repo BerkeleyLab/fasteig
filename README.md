@@ -36,7 +36,7 @@ Requires CMake 3.20 or newer and a C++17 compiler.
 
 ```bash
 # CPU build
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14
 cmake --build build -j
 ```
 
@@ -44,6 +44,7 @@ cmake --build build -j
 # GPU build (separate build directory — see the note below)
 cmake -S . -B build-cuda \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
     -DENABLE_CUDA=ON \
     -DCMAKE_CUDA_ARCHITECTURES=80
 cmake --build build-cuda -j
@@ -132,13 +133,13 @@ point at an existing install:
 ```bash
 # use a site-provided cuDSS module
 module load cudss
-cmake -S . -B build-cuda -DENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=90 \
+cmake -S . -B build-cuda -DENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=80 \
     -DCUDSS_DIR=$CUDSS_ROOT
 ```
 
 ```bash
 # pin the version and verify the download
-cmake -S . -B build-cuda -DENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=90 \
+cmake -S . -B build-cuda -DENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=80 \
     -DCUDSS_VERSION=0.8.0.10 \
     -DCUDSS_URL_HASH=<sha256>
 ```
