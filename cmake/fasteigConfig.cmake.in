@@ -1,0 +1,89 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+set(FASTEIG_WITH_CUDA     @ENABLE_CUDA@)
+set(FASTEIG_WITH_CUDSS    @USE_CUDSS@)
+set(FASTEIG_WITH_MKL      @FE_EXPORT_NEEDS_MKL@)
+set(FASTEIG_EIGEN_INCLUDE "@FASTEIG_EIGEN_INCLUDE@")
+set(FASTEIG_CUDSS_ROOT    "@FASTEIG_CUDSS_ROOT@")
+
+# --- Eigen ---------------------------------------------------------------------
+# Eigen is header-only; recreate the interface target from the include path that
+# was used at build time rather than requiring a full Eigen3 config package.
+if(NOT TARGET Eigen3::Eigen)
+    if(NOT EXISTS "${FASTEIG_EIGEN_INCLUDE}/Eigen/Core")
+        message(FATAL_ERROR
+            "fasteig was built against Eigen at '${FASTEIG_EIGEN_INCLUDE}', "
+            "but that directory no longer contains Eigen/Core.")
+    endif()
+    add_library(Eigen3::Eigen INTERFACE IMPORTED)
+    set_target_properties(Eigen3::Eigen PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${FASTEIG_EIGEN_INCLUDE}")
+endif()
+
+set(_fasteig_deps Eigen3::Eigen)
+
+# --- MKL -----------------------------------------------------------------------
+if(FASTEIG_WITH_MKL)
+    find_dependency(MKL CONFIG)
+    list(APPEND _fasteig_deps MKL::MKL)
+endif()
+
+# --- CUDA / cuDSS ---------------------------------------------------------------
+if(FASTEIG_WITH_CUDA)
+    find_dependency(CUDAToolkit)
+    list(APPEND _fasteig_deps
+        CUDA::cudart
+        CUDA::cublas
+        CUDA::cusparse
+        CUDA::cusolver)
+
+    if(FASTEIG_WITH_CUDSS)
+        find_package(cudss CONFIG QUIET
+            PATHS "${FASTEIG_CUDSS_ROOT}"
+            PATH_SUFFIXES lib/cmake/cudss lib64/cmake/cudss)
+
+        if(cudss_FOUND AND TARGET cudss)
+            list(APPEND _fasteig_deps cudss)
+        else()
+            find_library(FASTEIG_CUDSS_LIBRARY
+                NAMES cudss
+                PATHS "${FASTEIG_CUDSS_ROOT}/lib" "${FASTEIG_CUDSS_ROOT}/lib64"
+                PATH_SUFFIXES 11 12 13)
+            if(NOT FASTEIG_CUDSS_LIBRARY)
+                message(FATAL_ERROR
+                    "fasteig was built with cuDSS from '${FASTEIG_CUDSS_ROOT}', "
+                    "but libcudss can no longer be found there.")
+            endif()
+            if(NOT TARGET fasteig::cudss)
+                add_library(fasteig::cudss SHARED IMPORTED)
+                set_target_properties(fasteig::cudss PROPERTIES
+                    IMPORTED_LOCATION             "${FASTEIG_CUDSS_LIBRARY}"
+                    INTERFACE_INCLUDE_DIRECTORIES "${FASTEIG_CUDSS_ROOT}/include")
+            endif()
+            list(APPEND _fasteig_deps fasteig::cudss)
+        endif()
+    endif()
+endif()
+
+# --- the library itself ---------------------------------------------------------
+set_and_check(FASTEIG_INCLUDE_DIR "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+set_and_check(FASTEIG_LIBRARY
+    "@PACKAGE_CMAKE_INSTALL_LIBDIR@/lib@FE_OUTPUT_NAME@.a")
+
+if(NOT TARGET fasteig::fasteig)
+    add_library(fasteig::fasteig STATIC IMPORTED)
+    set_target_properties(fasteig::fasteig PROPERTIES
+        IMPORTED_LOCATION             "${FASTEIG_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${FASTEIG_INCLUDE_DIR}"
+        INTERFACE_COMPILE_DEFINITIONS "@FE_EXPORT_DEFS@")
+    target_link_libraries(fasteig::fasteig INTERFACE
+        ${_fasteig_deps}
+        @FE_EXPORT_EXTRA_LIBS@)
+endif()
+
+set(FASTEIG_LIBRARIES fasteig::fasteig)
+set(FASTEIG_FOUND TRUE)
+
+check_required_components(fasteig)

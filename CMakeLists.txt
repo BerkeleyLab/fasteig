@@ -27,6 +27,8 @@ if(NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 include(FetchContent)
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 # All third-party sources and downloads live here. Override to share a single
 # download cache across several build directories.
@@ -34,17 +36,21 @@ set(FETCHCONTENT_BASE_DIR "${CMAKE_BINARY_DIR}/_deps" CACHE PATH
     "Directory for all downloaded third-party dependencies")
 set(FASTEIG_DEPS_DIR "${FETCHCONTENT_BASE_DIR}")
 
-set(PLAT "Generic" CACHE STRING "Platform name (e.g., Perlmutter, Frontier)")
+set(PLAT "Generic" CACHE STRING "Platform name (e.g., Perlmutter, Frontier, spack)")
 
 # ------------------------------------------------------------------------------
 # Options
 # ------------------------------------------------------------------------------
-option(USE_MKL        "Use Intel MKL for BLAS/LAPACK"          OFF)
-option(USE_LIBSCI     "Use Cray LibSci for BLAS/LAPACK"        OFF)
-option(ENABLE_CUDA    "Build the NVIDIA GPU backend (src/GPU)" OFF)
+option(USE_MKL        "Use Intel MKL for BLAS/LAPACK"             OFF)
+option(USE_LIBSCI     "Use Cray LibSci for BLAS/LAPACK"           OFF)
+option(ENABLE_CUDA    "Build the NVIDIA GPU backend (src/gpu)"    OFF)
 option(USE_CUDSS      "Use the NVIDIA cuDSS sparse direct solver" ON)
-option(BUILD_EXAMPLES "Build example programs"                 ON)
-option(BUILD_TESTS    "Build and enable tests"                 OFF)
+option(BUILD_EXAMPLES "Build example programs"                    ON)
+option(BUILD_TESTS    "Build and enable tests"                    OFF)
+
+# Package managers (Spack, EasyBuild, distro builds) inject their own -march and
+# expect to control the target microarchitecture. Turn this off for those builds.
+option(FASTEIG_ARCH_NATIVE "Add -march=native to Release builds"  ON)
 
 if(USE_MKL AND USE_LIBSCI)
     message(FATAL_ERROR "USE_MKL and USE_LIBSCI are mutually exclusive. Choose one.")
@@ -58,6 +64,10 @@ endif()
 if(BUILD_TESTS AND NOT BUILD_EXAMPLES)
     message(FATAL_ERROR
         "BUILD_TESTS=ON requires BUILD_EXAMPLES=ON (runfasteig is the test driver).")
+endif()
+
+if(ENABLE_CUDA AND NOT EXISTS "${CMAKE_SOURCE_DIR}/src/gpu/CMakeLists.txt")
+    message(FATAL_ERROR "ENABLE_CUDA=ON but src/gpu/CMakeLists.txt is missing.")
 endif()
 
 # ------------------------------------------------------------------------------
@@ -120,13 +130,19 @@ set(FE_DBG_LINK  "")
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     message(STATUS "Compiler: GCC ${CMAKE_CXX_COMPILER_VERSION}")
-    set(FE_REL_FLAGS -O3 -march=native -funroll-loops)
+    set(FE_REL_FLAGS -O3 -funroll-loops)
     set(FE_DBG_FLAGS -O0 -g -Wall -Wextra -Wpedantic)
+    if(FASTEIG_ARCH_NATIVE)
+        list(APPEND FE_REL_FLAGS -march=native)
+    endif()
 
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(STATUS "Compiler: Clang ${CMAKE_CXX_COMPILER_VERSION}")
-    set(FE_REL_FLAGS -O3 -march=native -funroll-loops)
+    set(FE_REL_FLAGS -O3 -funroll-loops)
     set(FE_DBG_FLAGS -O0 -g -Wall -Wextra -Wpedantic)
+    if(FASTEIG_ARCH_NATIVE)
+        list(APPEND FE_REL_FLAGS -march=native)
+    endif()
 
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     message(STATUS "Compiler: Intel LLVM (icpx) ${CMAKE_CXX_COMPILER_VERSION}")
@@ -135,8 +151,11 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
 
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Intel")
     message(STATUS "Compiler: Intel Classic (icc/icpc) ${CMAKE_CXX_COMPILER_VERSION}")
-    set(FE_REL_FLAGS -O3 -march=native -funroll-loops -fp-model=fast)
+    set(FE_REL_FLAGS -O3 -funroll-loops -fp-model=fast)
     set(FE_DBG_FLAGS -O0 -g -Wall -Wextra)
+    if(FASTEIG_ARCH_NATIVE)
+        list(APPEND FE_REL_FLAGS -march=native)
+    endif()
 
 else()
     message(WARNING "Untested compiler: ${CMAKE_CXX_COMPILER_ID}. Using default flags.")
@@ -169,10 +188,10 @@ if(ENABLE_CUDA)
     )
 endif()
 
-if(PLAT STREQUAL "Perlmutter" OR PLAT STREQUAL "Frontier")
+if(FASTEIG_ARCH_NATIVE AND (PLAT STREQUAL "Perlmutter" OR PLAT STREQUAL "Frontier"))
     message(STATUS
         "Note: -march=native reflects the login node, which may differ from the "
-        "compute nodes on ${PLAT}.")
+        "compute nodes on ${PLAT}. Consider -DFASTEIG_ARCH_NATIVE=OFF.")
 endif()
 
 # ------------------------------------------------------------------------------
@@ -221,9 +240,23 @@ endif()
 
 # ------------------------------------------------------------------------------
 # BLAS and LAPACK
+#
+# FE_MATH_LIBS holds a plain list of link items for the exported package config.
+# Every branch below must populate it, or downstream find_package(fasteig) users
+# will get undefined BLAS symbols.
 # ------------------------------------------------------------------------------
-set(MATH_LINK_LIBRARIES    "")
+set(MATH_LINK_LIBRARIES      "")
 set(MATH_COMPILE_DEFINITIONS "")
+set(FE_MATH_LIBS             "")
+set(FE_EXPORT_NEEDS_MKL      FALSE)
+set(FASTEIG_BUNDLED_OPENBLAS FALSE)
+
+# Escape hatch for package managers: skip find_package entirely and use exactly
+# the link line provided. Spack resolves BLAS/LAPACK itself and passes them here.
+set(FASTEIG_BLAS_LIBRARIES   "" CACHE STRING
+    "Explicit BLAS link line (bypasses find_package)")
+set(FASTEIG_LAPACK_LIBRARIES "" CACHE STRING
+    "Explicit LAPACK link line (bypasses find_package)")
 
 if(USE_MKL)
 
@@ -253,8 +286,8 @@ if(USE_MKL)
     # LP64 is required: Eigen's Pardiso wrapper uses int throughout. ILP64 would
     # change MKL_INT to long long and break the pardiso() signature.
     # Do NOT add MKL_ILP64 to the compile definitions.
-    set(MKL_INTERFACE "lp64"               CACHE STRING "MKL integer interface" FORCE)
-    set(MKL_THREADING "${FE_MKL_THREADING}" CACHE STRING "MKL threading layer"  FORCE)
+    set(MKL_INTERFACE "lp64"                CACHE STRING "MKL integer interface" FORCE)
+    set(MKL_THREADING "${FE_MKL_THREADING}" CACHE STRING "MKL threading layer"   FORCE)
 
     set(MATH_COMPILE_DEFINITIONS EIGEN_USE_MKL_ALL USE_MKL)
 
@@ -265,6 +298,8 @@ if(USE_MKL)
         message(STATUS "  Interface: ${MKL_INTERFACE}")
         message(STATUS "  Threading: ${MKL_THREADING}")
         set(MATH_LINK_LIBRARIES MKL::MKL)
+        # Exported config re-resolves this via find_dependency(MKL).
+        set(FE_EXPORT_NEEDS_MKL TRUE)
     else()
         message(STATUS
             "MKL CMake config not found, using manual link line (LP64 + ${FE_MKL_THREADING})")
@@ -285,6 +320,17 @@ if(USE_MKL)
             -lm
             -ldl)
         set(MATH_LINK_LIBRARIES mkl_imported)
+
+        # Flat list for the exported config. -L/-Wl items survive as link flags.
+        set(FE_MATH_LIBS
+            "-L${MKLROOT}/lib/intel64"
+            "-Wl,-rpath,${MKLROOT}/lib/intel64"
+            "-Wl,--no-as-needed"
+            "-lmkl_intel_lp64"
+            "-lmkl_${FE_MKL_THREADING}"
+            "-lmkl_core"
+            "${FE_MKL_OMP_LIB}"
+            "-lpthread" "-lm" "-ldl")
     endif()
 
 elseif(USE_LIBSCI)
@@ -303,6 +349,7 @@ elseif(USE_LIBSCI)
             INTERFACE_LINK_LIBRARIES "sci_gnu;m")
         set(MATH_LINK_LIBRARIES libsci_imported)
         set(MATH_COMPILE_DEFINITIONS EIGEN_USE_BLAS EIGEN_USE_LAPACKE)
+        set(FE_MATH_LIBS "sci_gnu" "m")
     else()
         find_package(PkgConfig QUIET)
         if(PkgConfig_FOUND)
@@ -317,12 +364,28 @@ elseif(USE_LIBSCI)
                 INTERFACE_LINK_LIBRARIES      "${LIBSCI_LIBRARIES}")
             set(MATH_LINK_LIBRARIES libsci_imported)
             set(MATH_COMPILE_DEFINITIONS EIGEN_USE_BLAS EIGEN_USE_LAPACKE)
+            set(FE_MATH_LIBS ${LIBSCI_LIBRARIES})
         else()
             message(FATAL_ERROR
                 "USE_LIBSCI=ON but LibSci was not found. Ensure you are using the Cray "
                 "compiler wrappers (CC/cc) or set PKG_CONFIG_PATH.")
         endif()
     endif()
+
+elseif(FASTEIG_BLAS_LIBRARIES OR FASTEIG_LAPACK_LIBRARIES)
+
+    message(STATUS "Using explicitly provided BLAS/LAPACK")
+    message(STATUS "  BLAS:   ${FASTEIG_BLAS_LIBRARIES}")
+    message(STATUS "  LAPACK: ${FASTEIG_LAPACK_LIBRARIES}")
+
+    set(FE_MATH_LIBS ${FASTEIG_LAPACK_LIBRARIES} ${FASTEIG_BLAS_LIBRARIES})
+    list(REMOVE_DUPLICATES FE_MATH_LIBS)
+
+    add_library(math_imported INTERFACE IMPORTED)
+    set_target_properties(math_imported PROPERTIES
+        INTERFACE_LINK_LIBRARIES "${FE_MATH_LIBS}")
+    set(MATH_LINK_LIBRARIES math_imported)
+    set(MATH_COMPILE_DEFINITIONS EIGEN_USE_BLAS)
 
 else()
 
@@ -338,7 +401,6 @@ else()
         set(MATH_COMPILE_DEFINITIONS EIGEN_USE_BLAS)
 
         # LAPACKE depends on LAPACK, so with static archives it must come first.
-        set(FE_MATH_LIBS "")
         find_library(LAPACKE_LIB NAMES lapacke)
         if(LAPACKE_LIB)
             message(STATUS "Found LAPACKE: ${LAPACKE_LIB}")
@@ -392,6 +454,11 @@ else()
 
         set(MATH_LINK_LIBRARIES ${FE_OPENBLAS_TARGET})
         set(MATH_COMPILE_DEFINITIONS EIGEN_USE_BLAS)
+        set(FASTEIG_BUNDLED_OPENBLAS TRUE)
+
+        # The bundled archive is installed next to libfasteig, so the exported
+        # config refers to it by name relative to the install prefix.
+        set(FE_MATH_LIBS "\${PACKAGE_PREFIX_DIR}/${CMAKE_INSTALL_LIBDIR}/libopenblas.a")
         message(STATUS "OpenBLAS source: ${openblas_SOURCE_DIR}")
     endif()
 
@@ -407,7 +474,7 @@ if(USE_CUDSS)
 
     set(CUDSS_DIR "" CACHE PATH
         "Path to an existing cuDSS install (directory containing include/ and lib/)")
-    set(CUDSS_VERSION "0.5.0.16" CACHE STRING
+    set(CUDSS_VERSION "0.8.0.10" CACHE STRING
         "cuDSS redistributable version to download when CUDSS_DIR is not set")
     set(CUDSS_URL_HASH "" CACHE STRING
         "SHA256 of the cuDSS tarball (recommended; empty skips verification)")
@@ -469,9 +536,13 @@ if(USE_CUDSS)
             message(FATAL_ERROR
                 "Failed to download cuDSS: ${FE_CUDSS_DL_MSG}\n"
                 "  URL: ${FE_CUDSS_URL}\n"
-                "Check CUDSS_VERSION against the index at\n"
-                "  https://developer.download.nvidia.com/compute/cudss/redist/libcudss/${FE_CUDSS_PLAT}/\n"
-                "or download manually and pass -DCUDSS_DIR=...")
+                "Your CUDA toolkit is ${CUDAToolkit_VERSION}; cuDSS ${CUDSS_VERSION} may not "
+                "ship a cuda${CUDAToolkit_VERSION_MAJOR} build.\n"
+                "List available releases with\n"
+                "  curl -s https://developer.download.nvidia.com/compute/cudss/redist/redistrib_<ver>.json\n"
+                "then pass -DCUDSS_VERSION=<full.four.part.version> and -DCUDSS_URL_HASH=<sha256>,\n"
+                "or install cuDSS yourself and pass -DCUDSS_DIR=<path>,\n"
+                "or configure with -DUSE_CUDSS=OFF.")
         endif()
 
         file(ARCHIVE_EXTRACT
@@ -590,14 +661,15 @@ endif()
 # ------------------------------------------------------------------------------
 # Library output properties
 # ------------------------------------------------------------------------------
-if(TARGET fasteig)
-    set(FE_LIB_SUFFIX "${PLAT}")
-    if(ENABLE_CUDA)
-        string(APPEND FE_LIB_SUFFIX "_cuda")
-    endif()
+set(FE_LIB_SUFFIX "${PLAT}")
+if(ENABLE_CUDA)
+    string(APPEND FE_LIB_SUFFIX "_cuda")
+endif()
+set(FE_OUTPUT_NAME "fasteig_${FE_LIB_SUFFIX}")
 
+if(TARGET fasteig)
     set_target_properties(fasteig PROPERTIES
-        OUTPUT_NAME              "fasteig_${FE_LIB_SUFFIX}"
+        OUTPUT_NAME              "${FE_OUTPUT_NAME}"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
@@ -607,7 +679,67 @@ if(TARGET fasteig)
             CUDA_SEPARABLE_COMPILATION  ON
             CUDA_RESOLVE_DEVICE_SYMBOLS ON)
     endif()
+else()
+    message(FATAL_ERROR
+        "src/ did not create the 'fasteig' target. Check src/CMakeLists.txt.")
 endif()
+
+# ------------------------------------------------------------------------------
+# Installation
+# ------------------------------------------------------------------------------
+install(TARGETS fasteig
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING
+        PATTERN "*.h"
+        PATTERN "*.hpp"
+        PATTERN "*.hh"
+        PATTERN "*.cuh")
+
+if(BUILD_EXAMPLES AND TARGET runfasteig)
+    install(TARGETS runfasteig RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+# A bundled OpenBLAS is a build artifact of this project, so it must be installed
+# alongside the library or downstream links will fail.
+if(FASTEIG_BUNDLED_OPENBLAS AND TARGET ${FE_OPENBLAS_TARGET})
+    install(TARGETS ${FE_OPENBLAS_TARGET}
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
+
+# --- package config so downstream CMake projects can find_package(fasteig) ----
+# The imported target is written by hand rather than via install(EXPORT):
+# fasteig_math_deps links imported targets that belong to no export set, which
+# makes export() fail outright.
+set(FE_EXPORT_DEFS "${MATH_COMPILE_DEFINITIONS}")
+if(ENABLE_CUDA)
+    list(APPEND FE_EXPORT_DEFS FASTEIG_USE_CUDA)
+    if(USE_CUDSS)
+        list(APPEND FE_EXPORT_DEFS FASTEIG_USE_CUDSS)
+    endif()
+endif()
+
+set(FE_EXPORT_EXTRA_LIBS "${FE_MATH_LIBS}")
+
+configure_package_config_file(
+    "${CMAKE_SOURCE_DIR}/cmake/fasteigConfig.cmake.in"
+    "${CMAKE_BINARY_DIR}/fasteigConfig.cmake"
+    INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/fasteig")
+
+write_basic_package_version_file(
+    "${CMAKE_BINARY_DIR}/fasteigConfigVersion.cmake"
+    VERSION       ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion)
+
+install(FILES
+    "${CMAKE_BINARY_DIR}/fasteigConfig.cmake"
+    "${CMAKE_BINARY_DIR}/fasteigConfigVersion.cmake"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/fasteig")
 
 # ------------------------------------------------------------------------------
 # Summary
@@ -620,6 +752,8 @@ message(STATUS "  Compiler:       ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_
 message(STATUS "  CXX compiler:   ${CMAKE_CXX_COMPILER}")
 message(STATUS "  C compiler:     ${CMAKE_C_COMPILER}")
 message(STATUS "  C++ standard:   ${CMAKE_CXX_STANDARD}")
+message(STATUS "  -march=native:  ${FASTEIG_ARCH_NATIVE}")
+message(STATUS "  Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "  Deps directory: ${FASTEIG_DEPS_DIR}")
 message(STATUS "  Eigen:          ${FASTEIG_EIGEN_INCLUDE}")
 message(STATUS "  USE_MKL:        ${USE_MKL}")
@@ -642,5 +776,6 @@ if(USE_MKL)
     message(STATUS "  MKL interface:  ${MKL_INTERFACE}")
     message(STATUS "  MKL threading:  ${MKL_THREADING}")
 endif()
+message(STATUS "  Library name:   lib${FE_OUTPUT_NAME}.a")
 message(STATUS "===================================")
 message(STATUS "")
