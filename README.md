@@ -103,7 +103,7 @@ from source as a last resort.
 
 ```bash
 # Intel MKL — source setvars.sh first, or pass -DMKLROOT explicitly
-source /opt/intel/oneapi/setvars.sh
+module load PrgEnv-intel
 cmake -S . -B build -DUSE_MKL=ON
 
 # Cray LibSci via the compiler wrappers
