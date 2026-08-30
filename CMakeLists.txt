@@ -12,152 +12,221 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (Release or Debug)" FORCE)
-    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release")
-endif()
-
-if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
-    message(FATAL_ERROR "CMAKE_BUILD_TYPE must be 'Release' or 'Debug'. Got: '${CMAKE_BUILD_TYPE}'")
+# Single-config generators only: pick a default and validate it.
+if(NOT CMAKE_CONFIGURATION_TYPES)
+    if(NOT CMAKE_BUILD_TYPE)
+        set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (Release or Debug)" FORCE)
+        set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release")
+    endif()
+    if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+        message(FATAL_ERROR
+            "CMAKE_BUILD_TYPE must be 'Release' or 'Debug'. Got: '${CMAKE_BUILD_TYPE}'")
+    endif()
 endif()
 
 include(FetchContent)
 
+# All third-party sources and downloads live here. Override to share a single
+# download cache across several build directories.
+set(FETCHCONTENT_BASE_DIR "${CMAKE_BINARY_DIR}/_deps" CACHE PATH
+    "Directory for all downloaded third-party dependencies")
+set(FASTEIG_DEPS_DIR "${FETCHCONTENT_BASE_DIR}")
+
 set(PLAT "Generic" CACHE STRING "Platform name (e.g., Perlmutter, Frontier)")
-
-# ------------------------------------------------------------------------------
-# Compiler detection and flags
-# ------------------------------------------------------------------------------
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    message(STATUS "Compiler: GCC ${CMAKE_CXX_COMPILER_VERSION}")
-    add_compile_options(
-        $<$<CONFIG:Release>:-O3>
-        $<$<CONFIG:Release>:-march=native>
-        $<$<CONFIG:Release>:-funroll-loops>
-        $<$<CONFIG:Debug>:-O0>
-        $<$<CONFIG:Debug>:-g>
-        $<$<CONFIG:Debug>:-Wall>
-        $<$<CONFIG:Debug>:-Wextra>
-        $<$<CONFIG:Debug>:-Wpedantic>
-        $<$<CONFIG:Debug>:-fsanitize=address>
-    )
-    add_link_options($<$<CONFIG:Debug>:-fsanitize=address>)
-
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    message(STATUS "Compiler: Clang ${CMAKE_CXX_COMPILER_VERSION}")
-    add_compile_options(
-        $<$<CONFIG:Release>:-O3>
-        $<$<CONFIG:Release>:-march=native>
-        $<$<CONFIG:Release>:-funroll-loops>
-        $<$<CONFIG:Debug>:-O0>
-        $<$<CONFIG:Debug>:-g>
-        $<$<CONFIG:Debug>:-Wall>
-        $<$<CONFIG:Debug>:-Wextra>
-        $<$<CONFIG:Debug>:-Wpedantic>
-        $<$<CONFIG:Debug>:-fsanitize=address>
-    )
-    add_link_options($<$<CONFIG:Debug>:-fsanitize=address>)
-
-elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-    message(STATUS "Compiler: Intel LLVM (icpx) ${CMAKE_CXX_COMPILER_VERSION}")
-    add_compile_options(
-        $<$<CONFIG:Release>:-O3>
-        $<$<CONFIG:Release>:-funroll-loops>
-        $<$<CONFIG:Release>:-fp-model=fast>
-        $<$<CONFIG:Debug>:-O0>
-        $<$<CONFIG:Debug>:-g>
-        $<$<CONFIG:Debug>:-Wall>
-        $<$<CONFIG:Debug>:-Wextra>
-        $<$<CONFIG:Debug>:-fsanitize=address>
-    )
-    add_link_options($<$<CONFIG:Debug>:-fsanitize=address>)
-
-elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Intel")
-    message(STATUS "Compiler: Intel Classic (icc/icpc) ${CMAKE_CXX_COMPILER_VERSION}")
-    add_compile_options(
-        $<$<CONFIG:Release>:-O3>
-        $<$<CONFIG:Release>:-march=native>
-        $<$<CONFIG:Release>:-funroll-loops>
-        $<$<CONFIG:Release>:-fp-model=fast>
-        $<$<CONFIG:Debug>:-O0>
-        $<$<CONFIG:Debug>:-g>
-        $<$<CONFIG:Debug>:-Wall>
-        $<$<CONFIG:Debug>:-Wextra>
-    )
-
-else()
-    message(WARNING "Untested compiler: ${CMAKE_CXX_COMPILER_ID}. Using default flags.")
-    add_compile_options(
-        $<$<CONFIG:Release>:-O3>
-        $<$<CONFIG:Debug>:-O0>
-        $<$<CONFIG:Debug>:-g>
-    )
-endif()
 
 # ------------------------------------------------------------------------------
 # Options
 # ------------------------------------------------------------------------------
-option(USE_MKL        "Use Intel MKL for BLAS/LAPACK"    OFF)
-option(USE_LIBSCI     "Use Cray LibSci for BLAS/LAPACK"  OFF)
-option(BUILD_EXAMPLES "Build example programs"            ON)
-option(BUILD_TESTS    "Build and enable tests"           OFF)
+option(USE_MKL        "Use Intel MKL for BLAS/LAPACK"          OFF)
+option(USE_LIBSCI     "Use Cray LibSci for BLAS/LAPACK"        OFF)
+option(ENABLE_CUDA    "Build the NVIDIA GPU backend (src/GPU)" OFF)
+option(USE_CUDSS      "Use the NVIDIA cuDSS sparse direct solver" ON)
+option(BUILD_EXAMPLES "Build example programs"                 ON)
+option(BUILD_TESTS    "Build and enable tests"                 OFF)
 
 if(USE_MKL AND USE_LIBSCI)
     message(FATAL_ERROR "USE_MKL and USE_LIBSCI are mutually exclusive. Choose one.")
 endif()
 
+if(USE_CUDSS AND NOT ENABLE_CUDA)
+    message(STATUS "USE_CUDSS ignored because ENABLE_CUDA=OFF")
+    set(USE_CUDSS OFF)
+endif()
+
+if(BUILD_TESTS AND NOT BUILD_EXAMPLES)
+    message(FATAL_ERROR
+        "BUILD_TESTS=ON requires BUILD_EXAMPLES=ON (runfasteig is the test driver).")
+endif()
+
 # ------------------------------------------------------------------------------
-# Eigen
+# CUDA language
 # ------------------------------------------------------------------------------
-set(EIGEN_DIR "" CACHE PATH "Path to existing Eigen3 installation")
+if(ENABLE_CUDA)
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(NOT CMAKE_CUDA_COMPILER)
+        message(FATAL_ERROR
+            "ENABLE_CUDA=ON but no CUDA compiler was found. Load a CUDA module, put "
+            "nvcc on PATH, or pass -DCMAKE_CUDA_COMPILER=/path/to/nvcc.")
+    endif()
+
+    # nvcc must be paired with a host compiler it supports. icpx/icx are not
+    # supported hosts, so fall back to the system g++ for device translation units.
+    if(NOT DEFINED CMAKE_CUDA_HOST_COMPILER)
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            set(CMAKE_CUDA_HOST_COMPILER "${CMAKE_CXX_COMPILER}")
+        else()
+            find_program(FASTEIG_HOST_CXX NAMES g++)
+            if(FASTEIG_HOST_CXX)
+                set(CMAKE_CUDA_HOST_COMPILER "${FASTEIG_HOST_CXX}")
+                message(WARNING
+                    "CXX compiler is ${CMAKE_CXX_COMPILER_ID}, which nvcc does not support "
+                    "as a host compiler. Using ${FASTEIG_HOST_CXX} for CUDA sources.")
+            endif()
+        endif()
+    endif()
+
+    enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    set(CMAKE_CUDA_EXTENSIONS OFF)
+
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+            set(CMAKE_CUDA_ARCHITECTURES native)
+        else()
+            set(CMAKE_CUDA_ARCHITECTURES 70 80 90)
+        endif()
+    endif()
+
+    find_package(CUDAToolkit REQUIRED)
+
+    message(STATUS "CUDA toolkit:  ${CUDAToolkit_VERSION} (${CUDAToolkit_BIN_DIR})")
+    message(STATUS "CUDA host cxx: ${CMAKE_CUDA_HOST_COMPILER}")
+    message(STATUS "CUDA arch:     ${CMAKE_CUDA_ARCHITECTURES}")
+endif()
+
+# ------------------------------------------------------------------------------
+# Compiler detection and flags
+#
+# Flags are wrapped in COMPILE_LANGUAGE genexes so that host-only options such as
+# -march=native and -Wpedantic are never handed to nvcc, which rejects them.
+# ------------------------------------------------------------------------------
+set(FE_REL_FLAGS "")
+set(FE_DBG_FLAGS "")
+set(FE_DBG_LINK  "")
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    message(STATUS "Compiler: GCC ${CMAKE_CXX_COMPILER_VERSION}")
+    set(FE_REL_FLAGS -O3 -march=native -funroll-loops)
+    set(FE_DBG_FLAGS -O0 -g -Wall -Wextra -Wpedantic)
+
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(STATUS "Compiler: Clang ${CMAKE_CXX_COMPILER_VERSION}")
+    set(FE_REL_FLAGS -O3 -march=native -funroll-loops)
+    set(FE_DBG_FLAGS -O0 -g -Wall -Wextra -Wpedantic)
+
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    message(STATUS "Compiler: Intel LLVM (icpx) ${CMAKE_CXX_COMPILER_VERSION}")
+    set(FE_REL_FLAGS -O3 -funroll-loops -fp-model=fast)
+    set(FE_DBG_FLAGS -O0 -g -Wall -Wextra)
+
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Intel")
+    message(STATUS "Compiler: Intel Classic (icc/icpc) ${CMAKE_CXX_COMPILER_VERSION}")
+    set(FE_REL_FLAGS -O3 -march=native -funroll-loops -fp-model=fast)
+    set(FE_DBG_FLAGS -O0 -g -Wall -Wextra)
+
+else()
+    message(WARNING "Untested compiler: ${CMAKE_CXX_COMPILER_ID}. Using default flags.")
+    set(FE_REL_FLAGS -O3)
+    set(FE_DBG_FLAGS -O0 -g)
+endif()
+
+# ASan interacts badly with CUDA device code; use compute-sanitizer for GPU builds.
+if(NOT ENABLE_CUDA AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Intel")
+    list(APPEND FE_DBG_FLAGS -fsanitize=address)
+    set(FE_DBG_LINK -fsanitize=address)
+elseif(ENABLE_CUDA AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    message(STATUS "AddressSanitizer disabled for CUDA builds; use compute-sanitizer.")
+endif()
+
+add_compile_options(
+    "$<$<AND:$<COMPILE_LANGUAGE:CXX,C>,$<CONFIG:Release>>:${FE_REL_FLAGS}>"
+    "$<$<AND:$<COMPILE_LANGUAGE:CXX,C>,$<CONFIG:Debug>>:${FE_DBG_FLAGS}>"
+)
+if(FE_DBG_LINK)
+    add_link_options("$<$<CONFIG:Debug>:${FE_DBG_LINK}>")
+endif()
+
+if(ENABLE_CUDA)
+    # --expt-relaxed-constexpr is required whenever a .cu file includes Eigen.
+    add_compile_options(
+        "$<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-O3;--expt-relaxed-constexpr;--expt-extended-lambda>"
+        "$<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-O0;-g;-G;--expt-relaxed-constexpr;--expt-extended-lambda>"
+        "$<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:SHELL:-Xcompiler -O3>"
+    )
+endif()
+
+if(PLAT STREQUAL "Perlmutter" OR PLAT STREQUAL "Frontier")
+    message(STATUS
+        "Note: -march=native reflects the login node, which may differ from the "
+        "compute nodes on ${PLAT}.")
+endif()
+
+# ------------------------------------------------------------------------------
+# Eigen  ->  ${FASTEIG_DEPS_DIR}/eigen-src
+# ------------------------------------------------------------------------------
+set(EIGEN_DIR "" CACHE PATH "Path to an existing Eigen3 installation")
+set(EIGEN_TAG "3.4.0" CACHE STRING "Eigen git tag to fetch when EIGEN_DIR is unset")
+
+set(FASTEIG_EIGEN_INCLUDE "")
 
 if(EIGEN_DIR)
     if(EXISTS "${EIGEN_DIR}/Eigen/Core")
-        message(STATUS "Using Eigen from: ${EIGEN_DIR}")
-        add_library(Eigen3::Eigen INTERFACE IMPORTED)
-        set_target_properties(Eigen3::Eigen PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "${EIGEN_DIR}")
+        set(FASTEIG_EIGEN_INCLUDE "${EIGEN_DIR}")
     elseif(EXISTS "${EIGEN_DIR}/eigen3/Eigen/Core")
-        message(STATUS "Using Eigen from: ${EIGEN_DIR}/eigen3")
-        add_library(Eigen3::Eigen INTERFACE IMPORTED)
-        set_target_properties(Eigen3::Eigen PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "${EIGEN_DIR}/eigen3")
+        set(FASTEIG_EIGEN_INCLUDE "${EIGEN_DIR}/eigen3")
+    elseif(EXISTS "${EIGEN_DIR}/include/eigen3/Eigen/Core")
+        set(FASTEIG_EIGEN_INCLUDE "${EIGEN_DIR}/include/eigen3")
     else()
-        message(FATAL_ERROR "EIGEN_DIR set to '${EIGEN_DIR}' but Eigen/Core not found there.")
+        message(FATAL_ERROR "EIGEN_DIR set to '${EIGEN_DIR}' but Eigen/Core was not found there.")
     endif()
-elseif(EXISTS "${CMAKE_SOURCE_DIR}/eigen/Eigen/Core")
-    message(STATUS "Using previously cloned Eigen from: ${CMAKE_SOURCE_DIR}/eigen")
-    add_library(Eigen3::Eigen INTERFACE IMPORTED)
-    set_target_properties(Eigen3::Eigen PROPERTIES
-        INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/eigen")
+    message(STATUS "Using Eigen from: ${FASTEIG_EIGEN_INCLUDE}")
+
 else()
-    message(STATUS "EIGEN_DIR not set, cloning Eigen into ${CMAKE_SOURCE_DIR}/eigen ...")
+    message(STATUS "Fetching Eigen ${EIGEN_TAG} into ${FASTEIG_DEPS_DIR} ...")
+    # SOURCE_SUBDIR points at a directory with no CMakeLists.txt, so the content is
+    # downloaded but Eigen's own project() is never added. Eigen is header-only, so
+    # nothing is lost, and its cache variables stay out of our build.
     FetchContent_Declare(
         eigen
         GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-        GIT_TAG        master
+        GIT_TAG        ${EIGEN_TAG}
         GIT_SHALLOW    TRUE
-        SOURCE_DIR     "${CMAKE_SOURCE_DIR}/eigen"
+        GIT_PROGRESS   TRUE
+        SOURCE_SUBDIR  "fasteig-no-configure"
     )
-    set(EIGEN_BUILD_DOC     OFF CACHE BOOL "" FORCE)
-    set(EIGEN_BUILD_TESTING OFF CACHE BOOL "" FORCE)
-    set(BUILD_TESTING       OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(eigen)
-    if(NOT TARGET Eigen3::Eigen)
-        add_library(Eigen3::Eigen INTERFACE IMPORTED)
-        set_target_properties(Eigen3::Eigen PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/eigen")
-    endif()
-    message(STATUS "Eigen available at: ${CMAKE_SOURCE_DIR}/eigen")
+    set(FASTEIG_EIGEN_INCLUDE "${eigen_SOURCE_DIR}")
+    message(STATUS "Eigen available at: ${FASTEIG_EIGEN_INCLUDE}")
+endif()
+
+if(NOT TARGET Eigen3::Eigen)
+    add_library(Eigen3::Eigen INTERFACE IMPORTED)
+    set_target_properties(Eigen3::Eigen PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${FASTEIG_EIGEN_INCLUDE}")
 endif()
 
 # ------------------------------------------------------------------------------
 # BLAS and LAPACK
 # ------------------------------------------------------------------------------
+set(MATH_LINK_LIBRARIES    "")
+set(MATH_COMPILE_DEFINITIONS "")
+
 if(USE_MKL)
 
-    # Resolve MKLROOT from argument or environment
     if(NOT MKLROOT)
         if(DEFINED ENV{MKLROOT})
             set(MKLROOT "$ENV{MKLROOT}")
@@ -169,50 +238,52 @@ if(USE_MKL)
     endif()
 
     message(STATUS "Using MKL from: ${MKLROOT}")
-
-    # Try CMake config first (MKL >= 2021 ships one)
     list(APPEND CMAKE_PREFIX_PATH "${MKLROOT}/lib/cmake/mkl")
 
-    # LP64 is required: Eigen's Pardiso wrapper uses int throughout.
-    # ILP64 would change MKL_INT to long long and break the pardiso() signature.
-    # Do NOT add MKL_ILP64 to compile definitions.
-    set(MKL_INTERFACE "lp64"       CACHE STRING "MKL integer interface" FORCE)
-    set(MKL_THREADING "gnu_thread" CACHE STRING "MKL threading layer"   FORCE)
+    # The threading layer must match the compiler's OpenMP runtime. Mixing
+    # libgomp and libiomp5 in one process gives wrong results or deadlocks.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM" OR CMAKE_CXX_COMPILER_ID STREQUAL "Intel")
+        set(FE_MKL_THREADING "intel_thread")
+        set(FE_MKL_OMP_LIB   "-liomp5")
+    else()
+        set(FE_MKL_THREADING "gnu_thread")
+        set(FE_MKL_OMP_LIB   "-lgomp")
+    endif()
 
-    set(MATH_COMPILE_DEFINITIONS
-        EIGEN_USE_MKL_ALL
-        USE_MKL
-    )
+    # LP64 is required: Eigen's Pardiso wrapper uses int throughout. ILP64 would
+    # change MKL_INT to long long and break the pardiso() signature.
+    # Do NOT add MKL_ILP64 to the compile definitions.
+    set(MKL_INTERFACE "lp64"               CACHE STRING "MKL integer interface" FORCE)
+    set(MKL_THREADING "${FE_MKL_THREADING}" CACHE STRING "MKL threading layer"  FORCE)
+
+    set(MATH_COMPILE_DEFINITIONS EIGEN_USE_MKL_ALL USE_MKL)
 
     find_package(MKL QUIET CONFIG)
     if(MKL_FOUND)
         message(STATUS "Found MKL via CMake config")
-        message(STATUS "  MKL root:     ${MKL_ROOT}")
-        message(STATUS "  Interface:    ${MKL_INTERFACE}")
-        message(STATUS "  Threading:    ${MKL_THREADING}")
+        message(STATUS "  MKL root:  ${MKL_ROOT}")
+        message(STATUS "  Interface: ${MKL_INTERFACE}")
+        message(STATUS "  Threading: ${MKL_THREADING}")
         set(MATH_LINK_LIBRARIES MKL::MKL)
     else()
-        # Manual configuration mirroring the known-good link line:
-        #   -L${MKLROOT}/lib/intel64 -Wl,-rpath ${MKLROOT}/lib/intel64
-        #   -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core
-        #   -lgomp -lpthread -lm -ldl
-        message(STATUS "MKL CMake config not found, using manual link configuration (LP64 + GNU thread)")
+        message(STATUS
+            "MKL CMake config not found, using manual link line (LP64 + ${FE_MKL_THREADING})")
 
         add_library(mkl_imported INTERFACE IMPORTED)
         set_target_properties(mkl_imported PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "${MKLROOT}/include"
-            INTERFACE_LINK_LIBRARIES
-                "-L${MKLROOT}/lib/intel64;\
--Wl,-rpath,${MKLROOT}/lib/intel64;\
--Wl,--no-as-needed;\
--lmkl_intel_lp64;\
--lmkl_gnu_thread;\
--lmkl_core;\
--lgomp;\
--lpthread;\
--lm;\
--ldl"
-        )
+            INTERFACE_INCLUDE_DIRECTORIES "${MKLROOT}/include")
+        target_link_options(mkl_imported INTERFACE
+            "-L${MKLROOT}/lib/intel64"
+            "-Wl,-rpath,${MKLROOT}/lib/intel64"
+            "-Wl,--no-as-needed")
+        target_link_libraries(mkl_imported INTERFACE
+            -lmkl_intel_lp64
+            "-lmkl_${FE_MKL_THREADING}"
+            -lmkl_core
+            ${FE_MKL_OMP_LIB}
+            -lpthread
+            -lm
+            -ldl)
         set(MATH_LINK_LIBRARIES mkl_imported)
     endif()
 
@@ -221,10 +292,15 @@ elseif(USE_LIBSCI)
     include(CheckFunctionExists)
     set(CMAKE_REQUIRED_LIBRARIES "sci_gnu" "m")
     check_function_exists(dgemm_ HAVE_LIBSCI)
+    unset(CMAKE_REQUIRED_LIBRARIES)
 
     if(HAVE_LIBSCI)
         message(STATUS "Cray LibSci detected via compiler wrappers")
         add_library(libsci_imported INTERFACE IMPORTED)
+        # Link it explicitly: relying on the wrapper to inject it silently breaks
+        # as soon as anyone configures without CC/cc.
+        set_target_properties(libsci_imported PROPERTIES
+            INTERFACE_LINK_LIBRARIES "sci_gnu;m")
         set(MATH_LINK_LIBRARIES libsci_imported)
         set(MATH_COMPILE_DEFINITIONS EIGEN_USE_BLAS EIGEN_USE_LAPACKE)
     else()
@@ -243,8 +319,8 @@ elseif(USE_LIBSCI)
             set(MATH_COMPILE_DEFINITIONS EIGEN_USE_BLAS EIGEN_USE_LAPACKE)
         else()
             message(FATAL_ERROR
-                "USE_LIBSCI=ON but LibSci not found. "
-                "Ensure you are using Cray compiler wrappers (CC/cc) or set PKG_CONFIG_PATH.")
+                "USE_LIBSCI=ON but LibSci was not found. Ensure you are using the Cray "
+                "compiler wrappers (CC/cc) or set PKG_CONFIG_PATH.")
         endif()
     endif()
 
@@ -252,74 +328,244 @@ else()
 
     set(BLA_VENDOR "" CACHE STRING "BLAS vendor hint (e.g., OpenBLAS, Generic)")
 
-    find_package(BLAS  QUIET)
+    find_package(BLAS   QUIET)
     find_package(LAPACK QUIET)
 
     if(BLAS_FOUND AND LAPACK_FOUND)
         message(STATUS "Found system BLAS:   ${BLAS_LIBRARIES}")
         message(STATUS "Found system LAPACK: ${LAPACK_LIBRARIES}")
 
-        add_library(math_imported INTERFACE IMPORTED)
-        set_target_properties(math_imported PROPERTIES
-            INTERFACE_LINK_LIBRARIES "${LAPACK_LIBRARIES};${BLAS_LIBRARIES}")
-
         set(MATH_COMPILE_DEFINITIONS EIGEN_USE_BLAS)
 
+        # LAPACKE depends on LAPACK, so with static archives it must come first.
+        set(FE_MATH_LIBS "")
         find_library(LAPACKE_LIB NAMES lapacke)
         if(LAPACKE_LIB)
             message(STATUS "Found LAPACKE: ${LAPACKE_LIB}")
-            set_property(TARGET math_imported APPEND PROPERTY
-                INTERFACE_LINK_LIBRARIES "${LAPACKE_LIB}")
+            list(APPEND FE_MATH_LIBS "${LAPACKE_LIB}")
             list(APPEND MATH_COMPILE_DEFINITIONS EIGEN_USE_LAPACKE)
         else()
             message(STATUS "LAPACKE not found, using BLAS only for Eigen acceleration")
         endif()
+        list(APPEND FE_MATH_LIBS ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES})
 
+        add_library(math_imported INTERFACE IMPORTED)
+        set_target_properties(math_imported PROPERTIES
+            INTERFACE_LINK_LIBRARIES "${FE_MATH_LIBS}")
         set(MATH_LINK_LIBRARIES math_imported)
 
     else()
-        if(EXISTS "${CMAKE_SOURCE_DIR}/openblas/CMakeLists.txt")
-            message(STATUS "Using previously cloned OpenBLAS from: ${CMAKE_SOURCE_DIR}/openblas")
-            add_subdirectory("${CMAKE_SOURCE_DIR}/openblas"
-                             "${CMAKE_BINARY_DIR}/openblas")
+        message(STATUS
+            "System BLAS/LAPACK not found. Building OpenBLAS from source in ${FASTEIG_DEPS_DIR} ...")
+
+        FetchContent_Declare(
+            openblas
+            GIT_REPOSITORY https://github.com/OpenMathLib/OpenBLAS.git
+            GIT_TAG        v0.3.27
+            GIT_SHALLOW    TRUE
+            GIT_PROGRESS   TRUE
+        )
+        set(BUILD_SHARED_LIBS    OFF CACHE BOOL "" FORCE)
+        set(BUILD_STATIC_LIBS    ON  CACHE BOOL "" FORCE)
+        set(BUILD_WITHOUT_LAPACK OFF CACHE BOOL "" FORCE)
+        set(C_LAPACK             ON  CACHE BOOL "" FORCE)
+        set(NOFORTRAN            ON  CACHE BOOL "" FORCE)
+        set(BUILD_TESTING        OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(openblas)
+
+        # The target name differs between OpenBLAS versions and static/shared builds.
+        if(TARGET openblas_static)
+            set(FE_OPENBLAS_TARGET openblas_static)
+        elseif(TARGET openblas)
+            set(FE_OPENBLAS_TARGET openblas)
         else()
-            message(STATUS "System BLAS/LAPACK not found. Cloning OpenBLAS into ${CMAKE_SOURCE_DIR}/openblas ...")
-            FetchContent_Declare(
-                openblas
-                GIT_REPOSITORY https://github.com/OpenMathLib/OpenBLAS.git
-                GIT_TAG        v0.3.27
-                GIT_SHALLOW    TRUE
-                SOURCE_DIR     "${CMAKE_SOURCE_DIR}/openblas"
-            )
-            set(BUILD_SHARED_LIBS    OFF CACHE BOOL "" FORCE)
-            set(BUILD_WITHOUT_LAPACK OFF CACHE BOOL "" FORCE)
-            set(C_LAPACK             ON  CACHE BOOL "" FORCE)
-            set(NOFORTRAN            ON  CACHE BOOL "" FORCE)
-            FetchContent_MakeAvailable(openblas)
-            message(STATUS "OpenBLAS cloned to: ${CMAKE_SOURCE_DIR}/openblas")
+            message(FATAL_ERROR
+                "OpenBLAS was fetched but neither the 'openblas' nor 'openblas_static' "
+                "target exists. Check the OpenBLAS version pin.")
         endif()
 
-        set(MATH_LINK_LIBRARIES openblas)
+        target_include_directories(${FE_OPENBLAS_TARGET} INTERFACE
+            $<BUILD_INTERFACE:${openblas_SOURCE_DIR}>
+            $<BUILD_INTERFACE:${openblas_SOURCE_DIR}/lapack-netlib/LAPACKE/include>
+            $<BUILD_INTERFACE:${openblas_BINARY_DIR}>
+            $<BUILD_INTERFACE:${openblas_BINARY_DIR}/generated>)
+
+        set(MATH_LINK_LIBRARIES ${FE_OPENBLAS_TARGET})
         set(MATH_COMPILE_DEFINITIONS EIGEN_USE_BLAS)
-        message(STATUS "OpenBLAS will be built from source")
+        message(STATUS "OpenBLAS source: ${openblas_SOURCE_DIR}")
     endif()
 
 endif()
 
 # ------------------------------------------------------------------------------
-# Bundled math dependency target
+# cuDSS  ->  ${FASTEIG_DEPS_DIR}/cudss
 # ------------------------------------------------------------------------------
+set(FASTEIG_CUDSS_ROOT "")
+set(CUDSS_TARGET "")
+
+if(USE_CUDSS)
+
+    set(CUDSS_DIR "" CACHE PATH
+        "Path to an existing cuDSS install (directory containing include/ and lib/)")
+    set(CUDSS_VERSION "0.5.0.16" CACHE STRING
+        "cuDSS redistributable version to download when CUDSS_DIR is not set")
+    set(CUDSS_URL_HASH "" CACHE STRING
+        "SHA256 of the cuDSS tarball (recommended; empty skips verification)")
+
+    if(CUDSS_DIR)
+        if(NOT EXISTS "${CUDSS_DIR}/include/cudss.h")
+            message(FATAL_ERROR
+                "CUDSS_DIR='${CUDSS_DIR}' but include/cudss.h was not found there.")
+        endif()
+        set(FASTEIG_CUDSS_ROOT "${CUDSS_DIR}")
+        message(STATUS "Using cuDSS from: ${FASTEIG_CUDSS_ROOT}")
+
+    elseif(DEFINED ENV{CUDSS_ROOT} AND EXISTS "$ENV{CUDSS_ROOT}/include/cudss.h")
+        set(FASTEIG_CUDSS_ROOT "$ENV{CUDSS_ROOT}")
+        message(STATUS "Using cuDSS from CUDSS_ROOT: ${FASTEIG_CUDSS_ROOT}")
+
+    elseif(EXISTS "${FASTEIG_DEPS_DIR}/cudss/include/cudss.h")
+        set(FASTEIG_CUDSS_ROOT "${FASTEIG_DEPS_DIR}/cudss")
+        message(STATUS "Using previously downloaded cuDSS: ${FASTEIG_CUDSS_ROOT}")
+
+    else()
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+            set(FE_CUDSS_PLAT "linux-sbsa")
+        elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+            set(FE_CUDSS_PLAT "linux-x86_64")
+        else()
+            message(FATAL_ERROR
+                "No cuDSS redistributable for CMAKE_SYSTEM_PROCESSOR='${CMAKE_SYSTEM_PROCESSOR}'. "
+                "Install cuDSS manually and pass -DCUDSS_DIR=...")
+        endif()
+
+        set(FE_CUDSS_ARCHIVE
+            "libcudss-${FE_CUDSS_PLAT}-${CUDSS_VERSION}_cuda${CUDAToolkit_VERSION_MAJOR}-archive")
+        set(FE_CUDSS_URL
+            "https://developer.download.nvidia.com/compute/cudss/redist/libcudss/${FE_CUDSS_PLAT}/${FE_CUDSS_ARCHIVE}.tar.xz")
+        set(FE_CUDSS_TARBALL "${FASTEIG_DEPS_DIR}/${FE_CUDSS_ARCHIVE}.tar.xz")
+
+        file(MAKE_DIRECTORY "${FASTEIG_DEPS_DIR}")
+        message(STATUS "Downloading cuDSS ${CUDSS_VERSION} ...")
+        message(STATUS "  ${FE_CUDSS_URL}")
+
+        if(CUDSS_URL_HASH)
+            file(DOWNLOAD "${FE_CUDSS_URL}" "${FE_CUDSS_TARBALL}"
+                 SHOW_PROGRESS TLS_VERIFY ON
+                 EXPECTED_HASH SHA256=${CUDSS_URL_HASH}
+                 STATUS FE_CUDSS_DL_STATUS)
+        else()
+            message(WARNING
+                "CUDSS_URL_HASH is not set: downloading cuDSS without checksum verification.")
+            file(DOWNLOAD "${FE_CUDSS_URL}" "${FE_CUDSS_TARBALL}"
+                 SHOW_PROGRESS TLS_VERIFY ON
+                 STATUS FE_CUDSS_DL_STATUS)
+        endif()
+
+        list(GET FE_CUDSS_DL_STATUS 0 FE_CUDSS_DL_CODE)
+        if(NOT FE_CUDSS_DL_CODE EQUAL 0)
+            list(GET FE_CUDSS_DL_STATUS 1 FE_CUDSS_DL_MSG)
+            file(REMOVE "${FE_CUDSS_TARBALL}")
+            message(FATAL_ERROR
+                "Failed to download cuDSS: ${FE_CUDSS_DL_MSG}\n"
+                "  URL: ${FE_CUDSS_URL}\n"
+                "Check CUDSS_VERSION against the index at\n"
+                "  https://developer.download.nvidia.com/compute/cudss/redist/libcudss/${FE_CUDSS_PLAT}/\n"
+                "or download manually and pass -DCUDSS_DIR=...")
+        endif()
+
+        file(ARCHIVE_EXTRACT
+             INPUT       "${FE_CUDSS_TARBALL}"
+             DESTINATION "${FASTEIG_DEPS_DIR}")
+
+        file(REMOVE_RECURSE "${FASTEIG_DEPS_DIR}/cudss")
+        file(RENAME "${FASTEIG_DEPS_DIR}/${FE_CUDSS_ARCHIVE}"
+                    "${FASTEIG_DEPS_DIR}/cudss")
+
+        set(FASTEIG_CUDSS_ROOT "${FASTEIG_DEPS_DIR}/cudss")
+        message(STATUS "cuDSS extracted to: ${FASTEIG_CUDSS_ROOT}")
+    endif()
+
+    # Prefer the shipped package config so transitive dependencies are correct.
+    find_package(cudss CONFIG QUIET
+        PATHS "${FASTEIG_CUDSS_ROOT}"
+        PATH_SUFFIXES lib/cmake/cudss lib64/cmake/cudss
+        NO_DEFAULT_PATH)
+
+    if(cudss_FOUND AND TARGET cudss)
+        message(STATUS "Found cuDSS via its CMake config (version ${cudss_VERSION})")
+        set(CUDSS_TARGET cudss)
+        get_target_property(FE_CUDSS_LOC cudss IMPORTED_LOCATION)
+        if(NOT FE_CUDSS_LOC)
+            get_target_property(FE_CUDSS_LOC cudss IMPORTED_LOCATION_RELEASE)
+        endif()
+    else()
+        message(STATUS "cuDSS CMake config not found; building imported target manually")
+
+        find_library(CUDSS_LIBRARY
+            NAMES cudss
+            PATHS "${FASTEIG_CUDSS_ROOT}/lib" "${FASTEIG_CUDSS_ROOT}/lib64"
+            PATH_SUFFIXES "${CUDAToolkit_VERSION_MAJOR}"
+            NO_DEFAULT_PATH)
+
+        if(NOT CUDSS_LIBRARY)
+            message(FATAL_ERROR "libcudss was not found under ${FASTEIG_CUDSS_ROOT}/lib")
+        endif()
+
+        add_library(cudss_imported SHARED IMPORTED)
+        set_target_properties(cudss_imported PROPERTIES
+            IMPORTED_LOCATION             "${CUDSS_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${FASTEIG_CUDSS_ROOT}/include")
+        target_link_libraries(cudss_imported INTERFACE CUDA::cudart CUDA::cublas)
+
+        set(CUDSS_TARGET cudss_imported)
+        set(FE_CUDSS_LOC "${CUDSS_LIBRARY}")
+        message(STATUS "cuDSS library: ${CUDSS_LIBRARY}")
+    endif()
+
+    # cuDSS is a shared library outside the default loader path, so bake in an
+    # RPATH. Without this every executable dies at startup with
+    # "libcudss.so.0: cannot open shared object file".
+    if(FE_CUDSS_LOC)
+        get_filename_component(FE_CUDSS_LIBDIR "${FE_CUDSS_LOC}" DIRECTORY)
+    else()
+        set(FE_CUDSS_LIBDIR "${FASTEIG_CUDSS_ROOT}/lib")
+    endif()
+    list(APPEND CMAKE_BUILD_RPATH   "${FE_CUDSS_LIBDIR}")
+    list(APPEND CMAKE_INSTALL_RPATH "${FE_CUDSS_LIBDIR}")
+    set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)
+endif()
+
+# ------------------------------------------------------------------------------
+# Bundled dependency targets
+# ------------------------------------------------------------------------------
+add_library(fasteig_gpu_deps INTERFACE)
+
+if(ENABLE_CUDA)
+    target_link_libraries(fasteig_gpu_deps INTERFACE
+        CUDA::cudart
+        CUDA::cublas
+        CUDA::cusparse
+        CUDA::cusolver)
+    target_compile_definitions(fasteig_gpu_deps INTERFACE FASTEIG_USE_CUDA)
+
+    if(USE_CUDSS)
+        target_link_libraries(fasteig_gpu_deps INTERFACE ${CUDSS_TARGET})
+        target_compile_definitions(fasteig_gpu_deps INTERFACE FASTEIG_USE_CUDSS)
+    endif()
+endif()
+
 add_library(fasteig_math_deps INTERFACE)
 
-if(DEFINED MATH_LINK_LIBRARIES)
+if(MATH_LINK_LIBRARIES)
     target_link_libraries(fasteig_math_deps INTERFACE ${MATH_LINK_LIBRARIES})
 endif()
 
-if(DEFINED MATH_COMPILE_DEFINITIONS)
+if(MATH_COMPILE_DEFINITIONS)
     target_compile_definitions(fasteig_math_deps INTERFACE ${MATH_COMPILE_DEFINITIONS})
 endif()
 
-target_link_libraries(fasteig_math_deps INTERFACE Eigen3::Eigen)
+target_link_libraries(fasteig_math_deps INTERFACE Eigen3::Eigen fasteig_gpu_deps)
 
 # ------------------------------------------------------------------------------
 # Testing
@@ -345,12 +591,22 @@ endif()
 # Library output properties
 # ------------------------------------------------------------------------------
 if(TARGET fasteig)
+    set(FE_LIB_SUFFIX "${PLAT}")
+    if(ENABLE_CUDA)
+        string(APPEND FE_LIB_SUFFIX "_cuda")
+    endif()
+
     set_target_properties(fasteig PROPERTIES
-        OUTPUT_NAME                "fasteig_${PLAT}"
-        ARCHIVE_OUTPUT_DIRECTORY   "${CMAKE_BINARY_DIR}/lib"
-        LIBRARY_OUTPUT_DIRECTORY   "${CMAKE_BINARY_DIR}/lib"
-        RUNTIME_OUTPUT_DIRECTORY   "${CMAKE_BINARY_DIR}/bin"
-    )
+        OUTPUT_NAME              "fasteig_${FE_LIB_SUFFIX}"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+    if(ENABLE_CUDA)
+        set_target_properties(fasteig PROPERTIES
+            CUDA_SEPARABLE_COMPILATION  ON
+            CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+    endif()
 endif()
 
 # ------------------------------------------------------------------------------
@@ -361,9 +617,23 @@ message(STATUS "=== fasteig build configuration ===")
 message(STATUS "  Platform:       ${PLAT}")
 message(STATUS "  Build type:     ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Compiler:       ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
-message(STATUS "  C++ Standard:   ${CMAKE_CXX_STANDARD}")
+message(STATUS "  CXX compiler:   ${CMAKE_CXX_COMPILER}")
+message(STATUS "  C compiler:     ${CMAKE_C_COMPILER}")
+message(STATUS "  C++ standard:   ${CMAKE_CXX_STANDARD}")
+message(STATUS "  Deps directory: ${FASTEIG_DEPS_DIR}")
+message(STATUS "  Eigen:          ${FASTEIG_EIGEN_INCLUDE}")
 message(STATUS "  USE_MKL:        ${USE_MKL}")
 message(STATUS "  USE_LIBSCI:     ${USE_LIBSCI}")
+message(STATUS "  ENABLE_CUDA:    ${ENABLE_CUDA}")
+if(ENABLE_CUDA)
+    message(STATUS "  CUDA version:   ${CUDAToolkit_VERSION}")
+    message(STATUS "  CUDA arch:      ${CMAKE_CUDA_ARCHITECTURES}")
+    message(STATUS "  CUDA host cxx:  ${CMAKE_CUDA_HOST_COMPILER}")
+    message(STATUS "  USE_CUDSS:      ${USE_CUDSS}")
+    if(USE_CUDSS)
+        message(STATUS "  cuDSS root:     ${FASTEIG_CUDSS_ROOT}")
+    endif()
+endif()
 message(STATUS "  BUILD_EXAMPLES: ${BUILD_EXAMPLES}")
 message(STATUS "  BUILD_TESTS:    ${BUILD_TESTS}")
 message(STATUS "  Math defines:   ${MATH_COMPILE_DEFINITIONS}")
