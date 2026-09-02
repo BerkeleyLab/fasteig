@@ -104,7 +104,7 @@ from source as a last resort.
 ```bash
 # Intel MKL — source setvars.sh first, or pass -DMKLROOT explicitly
 module load PrgEnv-intel
-cmake -S . -B build -DUSE_MKL=ON
+cmake -S . -B build -DUSE_MKL=ON -DCMAKE_C_COMPILER=cc -DCMAKE_CXX_COMPILER=CC
 
 # Cray LibSci via the compiler wrappers
 module load PrgEnv-gnu
