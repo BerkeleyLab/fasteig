@@ -1,6 +1,7 @@
 #include "fasteig_logger.hpp"
 
 #include "fasteig_problem.hpp"
+#include "version.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -107,6 +108,61 @@ void fasteig_logger::section(std::string_view title) {
   if (auto* os = stream()) {
     *os << "\n" << title << "\n";
     *os << std::string(title.size(), '=') << "\n\n";
+  }
+}
+
+void fasteig_logger::print_version() {
+  if (auto* os = stream()) {
+    *os << "FASTEIG " << fasteig::version() << '\n';
+  }
+}
+
+void fasteig_logger::print_build_info() {
+  auto* os = stream();
+  if (!os) return;
+
+  const auto& info = fasteig::build_info();
+  auto print_kv = [&](const char* key, std::string_view value) {
+    *os << "  " << std::left << std::setw(22) << key << ": " << value << '\n';
+  };
+  auto print_bool = [&](const char* key, bool value) {
+    print_kv(key, value ? "Yes" : "No");
+  };
+
+  *os << "FASTEIG BUILD INFORMATION\n"
+      << "=========================\n\n";
+  print_kv("Version", info.version);
+  print_kv("Release Version", info.release_version);
+  print_kv("Git Commit", info.git_commit);
+  print_bool("Source Modified", info.git_dirty);
+  print_kv("Build System", info.build_system);
+  print_kv("Build Type", info.build_type);
+  print_kv("Configure Options", info.configure_options);
+  print_kv("CMake Version", info.cmake_version);
+  print_kv("CMake Generator", info.cmake_generator);
+  print_kv("C++ Compiler", info.cxx_compiler_id);
+  print_kv("Compiler Version", info.cxx_compiler_version);
+  print_kv("Compiler Path", info.cxx_compiler_path);
+  print_kv("C++ Flags", info.cxx_flags);
+  print_kv("C++ Standard", info.cxx_standard);
+  print_kv("Platform", info.platform);
+  print_bool("MKL", info.mkl_enabled);
+  print_bool("LibSci", info.libsci_enabled);
+  print_bool("CUDA", info.cuda_enabled);
+  print_bool("cuDSS", info.cudss_enabled);
+  if (info.cuda_enabled) {
+    print_kv("CUDA Compiler", info.cuda_compiler);
+    print_kv("CUDA Version", info.cuda_version);
+    print_kv("CUDA Flags", info.cuda_flags);
+    print_kv("CUDA Architectures", info.cuda_architectures);
+  }
+}
+
+void fasteig_logger::print_usage(std::string_view program) {
+  if (auto* os = stream()) {
+    *os << "Usage: " << program << " <input filename>\n"
+        << "       " << program << " --version\n"
+        << "       " << program << " --build-info\n";
   }
 }
 

@@ -639,6 +639,150 @@ endif()
 target_link_libraries(fasteig_math_deps INTERFACE Eigen3::Eigen fasteig_gpu_deps)
 
 # ------------------------------------------------------------------------------
+# Version and build provenance (xSDK M8)
+# ------------------------------------------------------------------------------
+# Keep the public preprocessor version synchronized with project(VERSION).  The
+# generated header below is private: the public API returns its embedded values
+# without exposing build-tree paths to downstream consumers.
+file(STRINGS "${CMAKE_SOURCE_DIR}/include/version.hpp"
+    FASTEIG_PUBLIC_VERSION_LINE
+    REGEX "^#define[ \\t]+FASTEIG_VERSION_STRING[ \\t]+\"")
+string(REGEX MATCH "\"([^\"]+)\"" _fasteig_version_match
+    "${FASTEIG_PUBLIC_VERSION_LINE}")
+set(FASTEIG_PUBLIC_VERSION "${CMAKE_MATCH_1}")
+if(NOT FASTEIG_PUBLIC_VERSION STREQUAL PROJECT_VERSION)
+    message(FATAL_ERROR
+        "Public FASTEIG_VERSION_STRING (${FASTEIG_PUBLIC_VERSION}) does not match "
+        "project version (${PROJECT_VERSION}).")
+endif()
+
+set(FASTEIG_GIT_COMMIT "" CACHE STRING
+    "Git commit to embed (empty means detect it from the source checkout)")
+set(FASTEIG_GIT_DIRTY "" CACHE STRING
+    "Whether the embedded Git checkout is modified: 0, 1, or empty to detect")
+
+find_package(Git QUIET)
+if(NOT FASTEIG_GIT_COMMIT)
+    set(FASTEIG_GIT_COMMIT "unknown")
+    if(Git_FOUND)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" rev-parse --verify HEAD
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            RESULT_VARIABLE _fasteig_git_result
+            OUTPUT_VARIABLE _fasteig_git_commit
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if(_fasteig_git_result EQUAL 0 AND _fasteig_git_commit)
+            set(FASTEIG_GIT_COMMIT "${_fasteig_git_commit}")
+        endif()
+    endif()
+endif()
+
+if(FASTEIG_GIT_DIRTY STREQUAL "")
+    set(FASTEIG_GIT_DIRTY 0)
+    if(Git_FOUND AND NOT FASTEIG_GIT_COMMIT STREQUAL "unknown")
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" status --porcelain
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            RESULT_VARIABLE _fasteig_status_result
+            OUTPUT_VARIABLE _fasteig_git_status
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if(_fasteig_status_result EQUAL 0 AND NOT _fasteig_git_status STREQUAL "")
+            set(FASTEIG_GIT_DIRTY 1)
+        endif()
+    endif()
+elseif(FASTEIG_GIT_DIRTY)
+    set(FASTEIG_GIT_DIRTY 1)
+else()
+    set(FASTEIG_GIT_DIRTY 0)
+endif()
+
+set(FASTEIG_BUILD_VERSION "${PROJECT_VERSION}")
+if(NOT FASTEIG_GIT_COMMIT STREQUAL "unknown")
+    string(SUBSTRING "${FASTEIG_GIT_COMMIT}" 0 12 FASTEIG_GIT_COMMIT_SHORT)
+    string(APPEND FASTEIG_BUILD_VERSION "+git.${FASTEIG_GIT_COMMIT_SHORT}")
+    if(FASTEIG_GIT_DIRTY)
+        string(APPEND FASTEIG_BUILD_VERSION ".dirty")
+    endif()
+endif()
+
+if(USE_MKL)
+    set(FASTEIG_BUILD_USE_MKL 1)
+else()
+    set(FASTEIG_BUILD_USE_MKL 0)
+endif()
+if(USE_LIBSCI)
+    set(FASTEIG_BUILD_USE_LIBSCI 1)
+else()
+    set(FASTEIG_BUILD_USE_LIBSCI 0)
+endif()
+if(ENABLE_CUDA)
+    set(FASTEIG_BUILD_ENABLE_CUDA 1)
+else()
+    set(FASTEIG_BUILD_ENABLE_CUDA 0)
+endif()
+if(USE_CUDSS)
+    set(FASTEIG_BUILD_USE_CUDSS 1)
+else()
+    set(FASTEIG_BUILD_USE_CUDSS 0)
+endif()
+
+if(CMAKE_CONFIGURATION_TYPES)
+    set(_fasteig_flags_config "")
+else()
+    string(TOUPPER "${CMAKE_BUILD_TYPE}" _fasteig_build_type_upper)
+    set(_fasteig_flags_config "${CMAKE_CXX_FLAGS_${_fasteig_build_type_upper}}")
+endif()
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    string(JOIN " " _fasteig_project_cxx_flags ${FE_DBG_FLAGS})
+else()
+    string(JOIN " " _fasteig_project_cxx_flags ${FE_REL_FLAGS})
+endif()
+string(STRIP
+    "${CMAKE_CXX_FLAGS} ${_fasteig_flags_config} ${_fasteig_project_cxx_flags}"
+    FASTEIG_CXX_FLAGS_TEXT)
+string(REPLACE "\n" " " FASTEIG_CXX_FLAGS_TEXT "${FASTEIG_CXX_FLAGS_TEXT}")
+
+set(FASTEIG_CMAKE_OPTIONS_TEXT
+    "CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE};PLAT=${PLAT};USE_MKL=${USE_MKL};USE_LIBSCI=${USE_LIBSCI};ENABLE_CUDA=${ENABLE_CUDA};USE_CUDSS=${USE_CUDSS};BUILD_EXAMPLES=${BUILD_EXAMPLES};BUILD_TESTS=${BUILD_TESTS};FASTEIG_ARCH_NATIVE=${FASTEIG_ARCH_NATIVE};EIGEN_DIR=${EIGEN_DIR};EIGEN_TAG=${EIGEN_TAG};FASTEIG_BLAS_LIBRARIES=${FASTEIG_BLAS_LIBRARIES};FASTEIG_LAPACK_LIBRARIES=${FASTEIG_LAPACK_LIBRARIES};CUDSS_DIR=${CUDSS_DIR};CUDSS_VERSION=${CUDSS_VERSION};CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}")
+
+if(ENABLE_CUDA)
+    set(FASTEIG_CUDA_COMPILER_TEXT "${CMAKE_CUDA_COMPILER}")
+    set(FASTEIG_CUDA_VERSION_TEXT "${CUDAToolkit_VERSION}")
+    set(FASTEIG_CUDA_ARCHITECTURES_TEXT "${CMAKE_CUDA_ARCHITECTURES}")
+    if(CMAKE_CONFIGURATION_TYPES)
+        set(_fasteig_cuda_flags_config "")
+    else()
+        set(_fasteig_cuda_flags_config
+            "${CMAKE_CUDA_FLAGS_${_fasteig_build_type_upper}}")
+    endif()
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(_fasteig_project_cuda_flags
+            "-O0 -g -G --expt-relaxed-constexpr --expt-extended-lambda")
+    else()
+        set(_fasteig_project_cuda_flags
+            "-O3 --expt-relaxed-constexpr --expt-extended-lambda -Xcompiler -O3")
+    endif()
+    string(STRIP
+        "${CMAKE_CUDA_FLAGS} ${_fasteig_cuda_flags_config} ${_fasteig_project_cuda_flags}"
+        FASTEIG_CUDA_FLAGS_TEXT)
+    string(REPLACE "\n" " " FASTEIG_CUDA_FLAGS_TEXT "${FASTEIG_CUDA_FLAGS_TEXT}")
+else()
+    set(FASTEIG_CUDA_COMPILER_TEXT "not enabled")
+    set(FASTEIG_CUDA_VERSION_TEXT "not enabled")
+    set(FASTEIG_CUDA_FLAGS_TEXT "not enabled")
+    set(FASTEIG_CUDA_ARCHITECTURES_TEXT "not enabled")
+endif()
+
+set(FASTEIG_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated/include")
+file(MAKE_DIRECTORY "${FASTEIG_GENERATED_INCLUDE_DIR}")
+configure_file(
+    "${CMAKE_SOURCE_DIR}/cmake/fasteig_build_config.hpp.in"
+    "${FASTEIG_GENERATED_INCLUDE_DIR}/fasteig_build_config.hpp"
+    @ONLY)
+
+# ------------------------------------------------------------------------------
 # Testing
 # ------------------------------------------------------------------------------
 if(BUILD_TESTS)
@@ -649,6 +793,9 @@ endif()
 # Subdirectories
 # ------------------------------------------------------------------------------
 add_subdirectory(src)
+
+target_include_directories(fasteig PRIVATE
+    $<BUILD_INTERFACE:${FASTEIG_GENERATED_INCLUDE_DIR}>)
 
 if(BUILD_EXAMPLES)
     add_subdirectory(examples)
@@ -729,7 +876,10 @@ set(FE_EXPORT_EXTRA_LIBS "${FE_MATH_LIBS}")
 configure_package_config_file(
     "${CMAKE_SOURCE_DIR}/cmake/fasteigConfig.cmake.in"
     "${CMAKE_BINARY_DIR}/fasteigConfig.cmake"
-    INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/fasteig")
+    INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/fasteig"
+    PATH_VARS
+        CMAKE_INSTALL_INCLUDEDIR
+        CMAKE_INSTALL_LIBDIR)
 
 write_basic_package_version_file(
     "${CMAKE_BINARY_DIR}/fasteigConfigVersion.cmake"
@@ -746,6 +896,9 @@ install(FILES
 # ------------------------------------------------------------------------------
 message(STATUS "")
 message(STATUS "=== fasteig build configuration ===")
+message(STATUS "  Version:        ${FASTEIG_BUILD_VERSION}")
+message(STATUS "  Git commit:     ${FASTEIG_GIT_COMMIT}")
+message(STATUS "  Source dirty:   ${FASTEIG_GIT_DIRTY}")
 message(STATUS "  Platform:       ${PLAT}")
 message(STATUS "  Build type:     ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Compiler:       ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
@@ -779,3 +932,4 @@ endif()
 message(STATUS "  Library name:   lib${FE_OUTPUT_NAME}.a")
 message(STATUS "===================================")
 message(STATUS "")
+

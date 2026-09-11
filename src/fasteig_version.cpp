@@ -1,0 +1,163 @@
+#include "version.hpp"
+
+#if __has_include("fasteig_build_config.hpp")
+#include "fasteig_build_config.hpp"
+#endif
+
+#ifndef FASTEIG_BUILD_VERSION
+#define FASTEIG_BUILD_VERSION FASTEIG_VERSION_STRING
+#endif
+
+#ifndef FASTEIG_BUILD_RELEASE_VERSION
+#define FASTEIG_BUILD_RELEASE_VERSION FASTEIG_VERSION_STRING
+#endif
+
+#ifndef FASTEIG_BUILD_GIT_COMMIT
+#define FASTEIG_BUILD_GIT_COMMIT "unknown"
+#endif
+
+#ifndef FASTEIG_BUILD_GIT_DIRTY
+#define FASTEIG_BUILD_GIT_DIRTY 0
+#endif
+
+#ifndef FASTEIG_BUILD_SYSTEM
+#define FASTEIG_BUILD_SYSTEM "unknown"
+#endif
+
+#ifndef FASTEIG_BUILD_TYPE
+#ifdef NDEBUG
+#define FASTEIG_BUILD_TYPE "Release"
+#else
+#define FASTEIG_BUILD_TYPE "Debug"
+#endif
+#endif
+
+#ifndef FASTEIG_BUILD_CONFIGURE_OPTIONS
+#define FASTEIG_BUILD_CONFIGURE_OPTIONS "not recorded"
+#endif
+
+#ifndef FASTEIG_BUILD_CMAKE_VERSION
+#define FASTEIG_BUILD_CMAKE_VERSION "not used"
+#endif
+
+#ifndef FASTEIG_BUILD_CMAKE_GENERATOR
+#define FASTEIG_BUILD_CMAKE_GENERATOR "not used"
+#endif
+
+#ifndef FASTEIG_BUILD_CXX_COMPILER_ID
+#if defined(__clang__)
+#define FASTEIG_BUILD_CXX_COMPILER_ID "Clang"
+#elif defined(__INTEL_LLVM_COMPILER)
+#define FASTEIG_BUILD_CXX_COMPILER_ID "IntelLLVM"
+#elif defined(__INTEL_COMPILER)
+#define FASTEIG_BUILD_CXX_COMPILER_ID "Intel"
+#elif defined(__GNUC__)
+#define FASTEIG_BUILD_CXX_COMPILER_ID "GNU"
+#else
+#define FASTEIG_BUILD_CXX_COMPILER_ID "unknown"
+#endif
+#endif
+
+#ifndef FASTEIG_BUILD_CXX_COMPILER_VERSION
+#ifdef __VERSION__
+#define FASTEIG_BUILD_CXX_COMPILER_VERSION __VERSION__
+#else
+#define FASTEIG_BUILD_CXX_COMPILER_VERSION "unknown"
+#endif
+#endif
+
+#ifndef FASTEIG_BUILD_CXX_COMPILER_PATH
+#define FASTEIG_BUILD_CXX_COMPILER_PATH "unknown"
+#endif
+
+#ifndef FASTEIG_BUILD_CXX_FLAGS
+#define FASTEIG_BUILD_CXX_FLAGS "not recorded"
+#endif
+
+#ifndef FASTEIG_BUILD_CXX_STANDARD
+#define FASTEIG_BUILD_CXX_STANDARD "17"
+#endif
+
+#ifndef FASTEIG_BUILD_PLATFORM
+#define FASTEIG_BUILD_PLATFORM "unknown"
+#endif
+
+#ifndef FASTEIG_BUILD_USE_MKL
+#ifdef USE_MKL
+#define FASTEIG_BUILD_USE_MKL 1
+#else
+#define FASTEIG_BUILD_USE_MKL 0
+#endif
+#endif
+
+#ifndef FASTEIG_BUILD_USE_LIBSCI
+#define FASTEIG_BUILD_USE_LIBSCI 0
+#endif
+
+#ifndef FASTEIG_BUILD_ENABLE_CUDA
+#if defined(FASTEIG_USE_CUDA) || defined(USE_CUDA)
+#define FASTEIG_BUILD_ENABLE_CUDA 1
+#else
+#define FASTEIG_BUILD_ENABLE_CUDA 0
+#endif
+#endif
+
+#ifndef FASTEIG_BUILD_USE_CUDSS
+#if defined(FASTEIG_USE_CUDSS) || defined(USE_CUDSS)
+#define FASTEIG_BUILD_USE_CUDSS 1
+#else
+#define FASTEIG_BUILD_USE_CUDSS 0
+#endif
+#endif
+
+#ifndef FASTEIG_BUILD_CUDA_COMPILER
+#define FASTEIG_BUILD_CUDA_COMPILER "not enabled"
+#endif
+
+#ifndef FASTEIG_BUILD_CUDA_VERSION
+#define FASTEIG_BUILD_CUDA_VERSION "not enabled"
+#endif
+
+#ifndef FASTEIG_BUILD_CUDA_FLAGS
+#define FASTEIG_BUILD_CUDA_FLAGS "not enabled"
+#endif
+
+#ifndef FASTEIG_BUILD_CUDA_ARCHITECTURES
+#define FASTEIG_BUILD_CUDA_ARCHITECTURES "not enabled"
+#endif
+
+namespace fasteig {
+
+std::string_view version() noexcept { return FASTEIG_BUILD_VERSION; }
+
+const BuildInfo& build_info() noexcept {
+  static constexpr BuildInfo info{
+      FASTEIG_BUILD_VERSION,
+      FASTEIG_BUILD_RELEASE_VERSION,
+      FASTEIG_BUILD_GIT_COMMIT,
+      FASTEIG_BUILD_GIT_DIRTY != 0,
+      FASTEIG_BUILD_SYSTEM,
+      FASTEIG_BUILD_TYPE,
+      FASTEIG_BUILD_CONFIGURE_OPTIONS,
+      FASTEIG_BUILD_CMAKE_VERSION,
+      FASTEIG_BUILD_CMAKE_GENERATOR,
+      FASTEIG_BUILD_CXX_COMPILER_ID,
+      FASTEIG_BUILD_CXX_COMPILER_VERSION,
+      FASTEIG_BUILD_CXX_COMPILER_PATH,
+      FASTEIG_BUILD_CXX_FLAGS,
+      FASTEIG_BUILD_CXX_STANDARD,
+      FASTEIG_BUILD_PLATFORM,
+      FASTEIG_BUILD_USE_MKL != 0,
+      FASTEIG_BUILD_USE_LIBSCI != 0,
+      FASTEIG_BUILD_ENABLE_CUDA != 0,
+      FASTEIG_BUILD_USE_CUDSS != 0,
+      FASTEIG_BUILD_CUDA_COMPILER,
+      FASTEIG_BUILD_CUDA_VERSION,
+      FASTEIG_BUILD_CUDA_FLAGS,
+      FASTEIG_BUILD_CUDA_ARCHITECTURES,
+  };
+  return info;
+}
+
+}  // namespace fasteig
+

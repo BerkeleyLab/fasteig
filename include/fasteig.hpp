@@ -15,6 +15,8 @@
 
 #pragma once
 
+#include "version.hpp"
+
 // =============================
 // Configuration
 // =============================
@@ -203,5 +205,4 @@ public:
     return b_mtx_symmetric || b_mtx_skew_symmetric ? (b_mtx_diag_nnz + 2 * b_mtx_offdiag_nnz) : b_mtx_stored_nnz();
   }
 };
-
 

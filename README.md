@@ -25,6 +25,8 @@ the library for other projects to consume.
 - [Running the examples](#running-the-examples)
   - [Input file format](#input-file-format)
   - [Solver and backend support](#solver-and-backend-support)
+- [Version and build information](#version-and-build-information)
+- [Support](#support)
 
 ---
 
@@ -104,7 +106,7 @@ from source as a last resort.
 ```bash
 # Intel MKL — source setvars.sh first, or pass -DMKLROOT explicitly
 module load PrgEnv-intel
-cmake -S . -B build -DUSE_MKL=ON -DCMAKE_C_COMPILER=cc -DCMAKE_CXX_COMPILER=CC
+cmake -S . -B build -DUSE_MKL=ON
 
 # Cray LibSci via the compiler wrappers
 module load PrgEnv-gnu
@@ -331,3 +333,45 @@ remains host-only.
 
 CUDA `which SAI` is available for scalar Lanczos and Krylov–Schur and requires
 NVIDIA cuDSS. The block methods and Davidson do not support `SAI`.
+
+---
+
+## Version and build information
+
+Every fasteig library records its release version, Git commit, source-tree
+state, build system, configure options, compiler and compiler flags, selected
+math backends, and CUDA configuration. The example driver exposes that metadata
+without requiring an input deck:
+
+```bash
+./runfasteig_cpu --version
+./runfasteig_cpu --build-info
+```
+
+For CMake builds, use `build/examples/runfasteig` instead. Development builds
+from a Git checkout append the abbreviated commit to the release version and
+mark builds made from a modified source tree as `dirty`.
+
+Applications can query the same information through the installed public API:
+
+```cpp
+#include <version.hpp>
+
+std::cout << fasteig::version() << '\n';
+const fasteig::BuildInfo& info = fasteig::build_info();
+std::cout << info.git_commit << '\n';
+```
+
+Numeric macros such as `FASTEIG_VERSION_MAJOR` and comparison helpers such as
+`FASTEIG_VERSION_GE(1, 0, 0)` are also available for compile-time checks.
+When configuring from a source archive without `.git`, package maintainers can
+preserve the revision with `-DFASTEIG_GIT_COMMIT=<full-sha>` and optionally
+`-DFASTEIG_GIT_DIRTY=0`.
+
+---
+
+## Support
+
+For installation help, usage questions, and bug-reporting instructions, see
+[SUPPORT.md](SUPPORT.md).
+

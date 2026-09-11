@@ -37,6 +37,11 @@ public:
   void section(std::string_view title);
   void flush();
 
+  // Command-line reports use the same attached stream as solver output.
+  void print_version();
+  void print_build_info();
+  void print_usage(std::string_view program);
+
   void print_progress_note(const std::string& message, int iter = -1);
   void print_locking_note(int eig_idx, int iter);
 

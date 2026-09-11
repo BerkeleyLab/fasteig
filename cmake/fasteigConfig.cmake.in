@@ -1,13 +1,10 @@
 @PACKAGE_INIT@
-
 include(CMakeFindDependencyMacro)
-
 set(FASTEIG_WITH_CUDA     @ENABLE_CUDA@)
 set(FASTEIG_WITH_CUDSS    @USE_CUDSS@)
 set(FASTEIG_WITH_MKL      @FE_EXPORT_NEEDS_MKL@)
 set(FASTEIG_EIGEN_INCLUDE "@FASTEIG_EIGEN_INCLUDE@")
 set(FASTEIG_CUDSS_ROOT    "@FASTEIG_CUDSS_ROOT@")
-
 # --- Eigen ---------------------------------------------------------------------
 # Eigen is header-only; recreate the interface target from the include path that
 # was used at build time rather than requiring a full Eigen3 config package.
@@ -21,15 +18,12 @@ if(NOT TARGET Eigen3::Eigen)
     set_target_properties(Eigen3::Eigen PROPERTIES
         INTERFACE_INCLUDE_DIRECTORIES "${FASTEIG_EIGEN_INCLUDE}")
 endif()
-
 set(_fasteig_deps Eigen3::Eigen)
-
 # --- MKL -----------------------------------------------------------------------
 if(FASTEIG_WITH_MKL)
     find_dependency(MKL CONFIG)
     list(APPEND _fasteig_deps MKL::MKL)
 endif()
-
 # --- CUDA / cuDSS ---------------------------------------------------------------
 if(FASTEIG_WITH_CUDA)
     find_dependency(CUDAToolkit)
@@ -38,12 +32,10 @@ if(FASTEIG_WITH_CUDA)
         CUDA::cublas
         CUDA::cusparse
         CUDA::cusolver)
-
     if(FASTEIG_WITH_CUDSS)
         find_package(cudss CONFIG QUIET
             PATHS "${FASTEIG_CUDSS_ROOT}"
             PATH_SUFFIXES lib/cmake/cudss lib64/cmake/cudss)
-
         if(cudss_FOUND AND TARGET cudss)
             list(APPEND _fasteig_deps cudss)
         else()
@@ -66,24 +58,22 @@ if(FASTEIG_WITH_CUDA)
         endif()
     endif()
 endif()
-
 # --- the library itself ---------------------------------------------------------
 set_and_check(FASTEIG_INCLUDE_DIR "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
 set_and_check(FASTEIG_LIBRARY
     "@PACKAGE_CMAKE_INSTALL_LIBDIR@/lib@FE_OUTPUT_NAME@.a")
-
 if(NOT TARGET fasteig::fasteig)
     add_library(fasteig::fasteig STATIC IMPORTED)
     set_target_properties(fasteig::fasteig PROPERTIES
         IMPORTED_LOCATION             "${FASTEIG_LIBRARY}"
         INTERFACE_INCLUDE_DIRECTORIES "${FASTEIG_INCLUDE_DIR}"
-        INTERFACE_COMPILE_DEFINITIONS "@FE_EXPORT_DEFS@")
+        INTERFACE_COMPILE_DEFINITIONS "@FE_EXPORT_DEFS@"
+        INTERFACE_COMPILE_FEATURES    "cxx_std_17")
     target_link_libraries(fasteig::fasteig INTERFACE
         ${_fasteig_deps}
         @FE_EXPORT_EXTRA_LIBS@)
 endif()
-
 set(FASTEIG_LIBRARIES fasteig::fasteig)
 set(FASTEIG_FOUND TRUE)
-
 check_required_components(fasteig)
+

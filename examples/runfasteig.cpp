@@ -1,4 +1,5 @@
 #include "fasteig.hpp"
+#include "fasteig_logger.hpp"
 #include "core/Executor.hpp"
 #include "fasteig_options.hpp"
 #include "parseinput.hpp"
@@ -23,8 +24,26 @@ std::string lower_copy(std::string s) {
 
 int main(int argc, const char* argv[])
 {
+  if (argc == 2) {
+    fasteig_logger cli_logger(&std::cout);
+    const std::string argument = argv[1];
+    if (argument == "--version" || argument == "-V") {
+      cli_logger.print_version();
+      return 0;
+    }
+    if (argument == "--build-info") {
+      cli_logger.print_build_info();
+      return 0;
+    }
+    if (argument == "--help" || argument == "-h") {
+      cli_logger.print_usage(argv[0]);
+      return 0;
+    }
+  }
+
   if (argc < 2) {
-    std::cerr << "[ERROR] Usage: " << argv[0] << " <input filename>\n";
+    fasteig_logger cli_logger(&std::cerr);
+    cli_logger.print_usage(argv[0]);
     return 1;
   }
 
