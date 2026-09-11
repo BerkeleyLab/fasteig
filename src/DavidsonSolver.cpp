@@ -128,7 +128,19 @@ FASTEIG_INT DavidsonSolver::solve() {
   FASTEIG_INT last_emitted_iter = 0;
 
   for (FASTEIG_INT iter = 0; iter < maxiter; ++iter) {
-    // Thick restart from the currently selected Ritz block.
+    // Thick restart: restore V^T V = I before using a standard projected
+    // eigensolve. Repeated Ritz rotations otherwise accumulate loss of
+    // orthogonality, especially when corrections approach roundoff.
+    MatrixXd restart_R;
+    info = core::thin_qr_in_place(
+        *ritz_vectors, restart_R, core::QrMethod::Householder);
+    if (info != 0) {
+      throw std::runtime_error("DavidsonSolver: restart QR failed.");
+    }
+
+    // QR changes the retained vectors. Refresh AV and V^T AV together rather
+    // than carrying the previous Ritz values over as a diagonal projection.
+    core::apply_block(*op, *ritz_vectors, 0, nev, *operator_ritz_vectors);
     basis->set_zero();
     operator_basis->set_zero();
     basis->copy_columns_from(0, *ritz_vectors, 0, nev);
@@ -136,8 +148,11 @@ FASTEIG_INT DavidsonSolver::solve() {
 
     projected.setZero();
     projected.topLeftCorner(static_cast<int>(nev), static_cast<int>(nev)) =
-        ritz.values.asDiagonal();
+        core::transpose_multiply(*basis, nev, *operator_basis, nev);
     FASTEIG_INT active_subspace_cols = nev;
+    ritz = core::extract_projected_ritz_pairs(
+        projected, *basis, *operator_basis, nev, nev, which,
+        *ritz_vectors, *operator_ritz_vectors, *residuals, "DavidsonSolver");
 
     for (FASTEIG_INT block = 1; block < maxblks; ++block) {
       std::vector<FASTEIG_INT> active_indices;
@@ -191,7 +206,7 @@ FASTEIG_INT DavidsonSolver::solve() {
           *basis, active_subspace_cols, *operator_correction, correction_cols);
       MatrixXd diagonal = core::transpose_multiply(
           *correction, correction_cols, *operator_correction, correction_cols);
-      diagonal = 0.5 * (diagonal + diagonal.transpose());
+      diagonal = (0.5 * (diagonal + diagonal.transpose())).eval();
 
       projected.block(0, static_cast<int>(active_subspace_cols),
                       static_cast<int>(active_subspace_cols),

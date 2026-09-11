@@ -52,7 +52,7 @@ ProjectedRitzPairs extract_projected_ritz_pairs(
 
   const int m = static_cast<int>(active_cols);
   MatrixXd projected = projected_matrix.topLeftCorner(m, m);
-  projected = 0.5 * (projected + projected.transpose());
+  projected = (0.5 * (projected + projected.transpose())).eval();
   Eigen::SelfAdjointEigenSolver<MatrixXd> eigensolver(projected);
   if (eigensolver.info() != Eigen::Success) {
     throw std::runtime_error(where + ": projected eigensolve failed.");
