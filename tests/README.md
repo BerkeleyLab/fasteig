@@ -58,6 +58,31 @@ python3 tests/scripts/run_case.py --solver Lanczos --which SR --matrix SiO
 python3 tests/scripts/run_case.py --solver Lanczos --which LR --matrix SiO
 ```
 
+Chebyshev uses the same reference checks for CPU and CUDA. After building with
+`make -C examples USE_CUDA=1`, run these from the repository root on a GPU node:
+
+```sh
+python3 tests/scripts/run_suite.py --solver Chebyshev --matrix SiO --runfasteig examples/runfasteig_cpu
+python3 tests/scripts/run_suite.py --solver Chebyshev --matrix SiO --runfasteig examples/runfasteig_gpu
+```
+
+Each command checks both `SR` and `LR`. For a CMake CUDA build, pass
+`--runfasteig build-cuda/examples/runfasteig` instead. Chebyshev now uses the
+same residual normalization for progress, convergence, and final results:
+`||Ax - lambda*x|| / ((1 + |lambda|) * ||x||)`.
+
+LOBPCG uses the same CPU/CUDA SR/LR reference checks and residual normalization:
+
+```sh
+python3 tests/scripts/run_suite.py --solver LOBPCG --matrix SiO --runfasteig examples/runfasteig_cpu
+python3 tests/scripts/run_suite.py --solver LOBPCG --matrix SiO --runfasteig examples/runfasteig_gpu
+```
+
+Use the GPU executable on a GPU node after building with `USE_CUDA=1`. Both
+commands use the same seed by default. Large LOBPCG blocks stay in executor
+memory; the small projected eigensolve runs on the host. LOBPCG currently
+supports only standard `SR`/`LR` problems, without preconditioning.
+
 Specify a different `.mtx` file (MatrixMarket coordinate) by passing a path to `--matrix`:
 
 ```sh

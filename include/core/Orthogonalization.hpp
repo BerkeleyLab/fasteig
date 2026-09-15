@@ -2,6 +2,8 @@
 
 #include "fasteig.hpp"
 
+#include <memory>
+
 namespace fasteig {
 namespace core {
 
@@ -45,6 +47,16 @@ FASTEIG_INT block_gram_schmidt(const MultiVector& basis,
                                const MultiVector& source,
                                MultiVector& residual,
                                MatrixXd& H);
+
+// Orthonormal basis for the part of source outside basis(:,0:active_cols).
+// Drop numerically dependent directions instead of completing QR with arbitrary
+// columns. Returns nullptr if no direction survives. Large blocks stay on the
+// executor; rank decisions use only the small Householder R factor on the host.
+std::unique_ptr<MultiVector> orthonormalize_block(
+    const MultiVector& basis,
+    FASTEIG_INT active_cols,
+    const MultiVector& source,
+    double rank_tolerance = 1e-12);
 
 FASTEIG_INT orthogonalize_block_against_basis(MultiVector& basis,
                                               FASTEIG_INT active_cols,

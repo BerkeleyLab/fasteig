@@ -550,6 +550,66 @@ FASTEIG_INT block_gram_schmidt(const MultiVector& basis,
   throw std::invalid_argument("block_gram_schmidt: unsupported multivector backend.");
 }
 
+std::unique_ptr<MultiVector> orthonormalize_block(
+    const MultiVector& basis,
+    FASTEIG_INT active_cols,
+    const MultiVector& source,
+    double rank_tolerance) {
+  validate_multivector_qr(source, "orthonormalize_block");
+  if (&basis.executor() != &source.executor() || basis.rows() != source.rows() ||
+      active_cols < 0 || active_cols > basis.cols() || active_cols > basis.rows()) {
+    throw std::invalid_argument("orthonormalize_block: invalid basis or executor.");
+  }
+  if (!std::isfinite(rank_tolerance) || rank_tolerance <= 0.0 || rank_tolerance >= 1.0) {
+    throw std::invalid_argument("orthonormalize_block: rank tolerance must be in (0,1).");
+  }
+  if (active_cols == basis.rows()) return nullptr;
+
+  const Executor& exec = source.executor();
+  const MultiVector* current = &source;
+  std::unique_ptr<MultiVector> result;
+  // Projection can leave a nearly dependent block. Normalize only independent
+  // directions, then reproject the normalized block to remove amplified errors.
+  for (int pass = 0; pass < 2; ++pass) {
+    const VectorXd norms = current->column_norms();
+    if (!norms.allFinite()) {
+      throw std::runtime_error("orthonormalize_block: non-finite column norms.");
+    }
+    const double scale = norms.maxCoeff();
+    if (scale == 0.0) return nullptr;
+
+    auto orthogonal = exec.create_multivector(source.rows(), current->cols());
+    MatrixXd projection, R;
+    if (block_gram_schmidt(basis, active_cols, *current, *orthogonal, projection) != 0 ||
+        thin_qr_in_place(*orthogonal, R, QrMethod::Householder) != 0) {
+      throw std::runtime_error("orthonormalize_block: orthogonalization failed.");
+    }
+    if (!R.allFinite()) {
+      throw std::runtime_error("orthonormalize_block: non-finite QR factor.");
+    }
+    // SVD of R avoids squaring its condition number. Q*U spans precisely the
+    // retained part of the input, including for zero/rank-deficient blocks.
+    Eigen::JacobiSVD<MatrixXd> svd(R, Eigen::ComputeThinU);
+    const auto& singular_values = svd.singularValues();
+    // Eigen 3.3 (still used on Perlmutter) has no JacobiSVD::info().
+    if (!singular_values.allFinite() || !svd.matrixU().allFinite()) {
+      throw std::runtime_error("orthonormalize_block: non-finite QR-factor SVD.");
+    }
+    FASTEIG_INT rank = 0;
+    const FASTEIG_INT capacity = std::min<FASTEIG_INT>(
+        current->cols(), source.rows() - active_cols);
+    while (rank < capacity && singular_values(rank) > rank_tolerance * scale) ++rank;
+    if (rank == 0) return nullptr;
+
+    auto next = exec.create_multivector(source.rows(), rank);
+    orthogonal->right_multiply_active_columns(
+        current->cols(), svd.matrixU().leftCols(rank), *next);
+    result = std::move(next);
+    current = result.get();
+  }
+  return result;
+}
+
 FASTEIG_INT orthogonalize_block_against_basis(MultiVector& basis,
                                               FASTEIG_INT active_cols,
                                               const MultiVector& source,

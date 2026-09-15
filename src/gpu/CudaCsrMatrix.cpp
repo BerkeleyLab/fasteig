@@ -214,7 +214,8 @@ void CudaCsrMatrix::apply_block(const MultiVector& X,
   auto y = exec_.create_vector(rows_);
   for (FASTEIG_INT j = 0; j < block_size; ++j) {
     if (beta != 0.0) {
-      y->copy_from_host(Y.copy_column_to_host(j));
+      // Preserve the accumulation term without a device-host-device round trip.
+      Y.copy_column_to(j, *y);
     }
     apply_column(X, first_col + j, *y, alpha, beta);
     cuda_Y->copy_column_from(j, *y);

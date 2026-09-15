@@ -327,12 +327,31 @@ tol     1e-6
 ### Solver and backend support
 
 The GPU executable dispatches `Lanczos`, `BlockLanczos`, `KrylovSchur`,
-`BlockKrylovSchur`, and `Davidson` through the CUDA executor. These CUDA paths
+`BlockKrylovSchur`, `Davidson`, `Chebyshev`, and `LOBPCG` through the CUDA executor. These CUDA paths
 currently support standard stored-matrix problems; generalized Krylov–Schur
 remains host-only.
 
 CUDA `which SAI` is available for scalar Lanczos and Krylov–Schur and requires
-NVIDIA cuDSS. The block methods and Davidson do not support `SAI`.
+NVIDIA cuDSS. The block methods, Davidson, Chebyshev, and LOBPCG do not support `SAI`.
+
+Chebyshev supports `SR` and `LR` for standard problems on both executors. Its
+filter recurrence, trial blocks, Cholesky QR, deflation, Ritz-vector rotation,
+and residual evaluation use executor memory. The small projected eigensolve
+uses the shared host Rayleigh–Ritz path, as in Davidson; only small matrices
+and convergence data cross to the host during iteration. The final requested
+eigenvectors are copied back once. Use the same `seed` and input deck when
+comparing CPU and GPU runs. `print_every` controls progress output, while
+convergence is checked after every filter cycle.
+
+LOBPCG supports `SR` and `LR` for standard problems on both executors. Its
+block width is `nev`. The current vectors `X`, residual directions `W`, previous
+search directions `P`, trial basis, and operator images stay in executor memory.
+The shared block Gram--Schmidt/Householder QR path removes dependent directions;
+the small projected eigensolve uses the same host Ritz extraction as Davidson
+and Chebyshev. No preconditioner is currently applied (`W` starts from the
+residuals). Convergence is checked each iteration, and `print_every` controls
+progress output. Use the same input deck and `seed` for CPU/CUDA comparisons.
+`SM`, `LM`, `BE`, `SAI`, and generalized problems are not supported by LOBPCG.
 
 ---
 

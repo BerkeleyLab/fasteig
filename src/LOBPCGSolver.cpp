@@ -1,567 +1,175 @@
 #include "LOBPCGSolver.hpp"
 
 #include "core/Executor.hpp"
+#include "core/LinearOperator.hpp"
+#include "core/MultiVector.hpp"
 #include "core/Operations.hpp"
-#include "fasteig.hpp"
-#include "fasteig_problem.hpp"
+#include "core/Orthogonalization.hpp"
+#include "core/RitzExtraction.hpp"
 #include "fasteig_logger.hpp"
+#include "fasteig_problem.hpp"
 
 #include <algorithm>
-#include <cstdlib>
+#include <iostream>
+#include <memory>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace fasteig {
 
-using namespace Eigen;
-using namespace std;
-
 LOBPCGSolver::LOBPCGSolver(::fasteig_problem& problem,
                            const fasteig_options& options)
-    : fasteig_solver(problem, options),
-      lam(eigvals_),
-      V(eigvecs_) {}
-
-void LOBPCGSolver::reset_state(double ctol,
-                               double otol,
-                               int vb,
-                               int pe,
-                               std::ostream* logstream) {
-  conv_tol = ctol;
-  orth_tol = otol;
-  verbose = vb;
-  print_every = pe;
-
-  iter = -1;
-  b_conv = 0;
-  use_orth = false;
-
-  const int n_i = V.rows();
-  const int b_i = V.cols();
-  n = static_cast<size_t>(n_i);
-  b = static_cast<size_t>(b_i);
-
-  XP = MatrixXd(n_i, 2 * b_i);
-  AXP = MatrixXd(n_i, 2 * b_i);
-  W = MatrixXd(n_i, b_i);
-  AW = MatrixXd(n_i, b_i);
-
-  StAS = MatrixXd(3 * b_i, 3 * b_i);
-  StS = MatrixXd(3 * b_i, 3 * b_i);
-  C = MatrixXd(3 * b_i, 2 * b_i);
-
-  resnorms = VectorXd(b_i);
-  eigsolver = Eigen::SelfAdjointEigenSolver<MatrixXd>(3 * b_i);
-
-  log = logstream;
-  logging = (print_every > 0) && (log != nullptr);
-}
+    : fasteig_solver(problem, options) {}
 
 FASTEIG_INT LOBPCGSolver::solve() {
-  // Respect which: for LR/LM we run on -A (same eigenvectors) and negate eigenvalues back.
-  auto lower_copy = [](std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
-  };
-  const std::string which_l = lower_copy(options_.which());
-  const bool flip_sign = (which_l == "lr" || which_l == "lm");
-
-  std::shared_ptr<core::Executor> exec = problem_.executor(options_);
-  op_ = problem_.make_linear_operator(options_, *exec);
-  effective_op_ = std::make_unique<core::ScaledLinearOperator>(*op_, flip_sign ? -1.0 : 1.0);
-
+  const FASTEIG_INT n = eigvecs_.rows();
   const FASTEIG_INT nev = options_.nev();
   const FASTEIG_INT maxiter = options_.maxiter();
-  const FASTEIG_DOUBLE tol = options_.tol();
-  const FASTEIG_DOUBLE orth_tol = 1.0e-10;
-  const int verbosity = options_.verbosity();
   const FASTEIG_INT print_every = options_.print_every();
+  const double tol = options_.tol();
+  const std::string which = core::lanczos_lower_copy(options_.which());
+  if (n <= 0 || nev <= 0 || nev > n || maxiter <= 0) {
+    throw std::invalid_argument("LOBPCGSolver: require 0 < nev <= n and maxiter > 0.");
+  }
+  if (which != "sr" && which != "lr") {
+    throw std::invalid_argument("LOBPCGSolver: only SR and LR are supported.");
+  }
+  if (problem_.is_generalized()) {
+    throw std::invalid_argument("LOBPCGSolver: generalized problems are not supported.");
+  }
 
+  // 1. Initialize X in executor memory. LR minimizes the Rayleigh quotient of
+  // -A; eigenvalues are converted back for both progress and final output.
+  auto exec = problem_.executor(options_);
+  auto op = problem_.make_linear_operator(options_, *exec);
+  const bool flip_sign = which == "lr";
+  core::ScaledLinearOperator effective_op(*op, flip_sign ? -1.0 : 1.0);
+  auto X = exec->create_random_multivector(n, nev, options_.seed().value_or(1u));
   if (options_.v0().size() > 0) {
-    if (options_.v0().rows() != eigvecs_.rows()) {
-      throw std::invalid_argument("LOBPCGSolver: v0 row count does not match problem dimension.");
+    if (options_.v0().rows() != n) {
+      throw std::invalid_argument("LOBPCGSolver: v0 row count does not match the problem.");
     }
-    eigvecs_.setRandom();
-    const int c = std::min<int>(options_.v0().cols(), static_cast<int>(nev));
-    eigvecs_.leftCols(c) = options_.v0().leftCols(c);
-  } else {
-    if (options_.seed().has_value()) std::srand(*options_.seed());
-    eigvecs_.setRandom();
+    const FASTEIG_INT provided_cols = std::min<FASTEIG_INT>(nev, options_.v0().cols());
+    auto initial = exec->create_multivector(options_.v0().leftCols(provided_cols));
+    X->copy_columns_from(0, *initial, 0, provided_cols);
+  }
+  MatrixXd qr_factor;
+  if (core::thin_qr_in_place(*X, qr_factor, core::QrMethod::Householder) != 0) {
+    throw std::runtime_error("LOBPCGSolver: initial QR failed.");
   }
 
-  std::ostream* log = problem_.log_stream();
-  reset_state(tol, orth_tol, verbosity, print_every, log);
+  // At most three blocks: current Ritz vectors X, residual directions W, and
+  // previous search directions P. P is empty on the first iteration.
+  const FASTEIG_INT capacity = static_cast<FASTEIG_INT>(
+      std::min<long long>(n, 3LL * nev));
+  auto basis = exec->create_multivector(n, capacity);
+  auto operator_basis = exec->create_multivector(n, capacity);
+  auto AX = exec->create_multivector(n, nev);
+  auto residuals = exec->create_multivector(n, nev);
+  std::unique_ptr<core::MultiVector> P;
+
+  basis->copy_columns_from(0, *X, 0, nev);
+  core::apply_block(effective_op, *X, 0, nev, *AX);
+  operator_basis->copy_columns_from(0, *AX, 0, nev);
+  MatrixXd projected = core::transpose_multiply(*X, nev, *AX, nev);
+  auto ritz = core::extract_projected_ritz_pairs(
+      projected, *basis, *operator_basis, nev, nev, "sr", *X, *AX, *residuals,
+      "LOBPCGSolver");
+
   fasteig_logger stdout_logger;
-  if (verbose >= 2) stdout_logger.attach(&std::cout);
+  if (options_.verbosity() >= 2) stdout_logger.attach(&std::cout);
+  auto* log_logger = (print_every > 0 && problem_.log_stream()) ? &problem_.logger() : nullptr;
+  auto* console_logger = (print_every > 0 && options_.verbosity() >= 2) ? &stdout_logger : nullptr;
+  long long it_done = 0;
 
-  for (int i = 0; i < maxiter; ++i) {
-      /*
-      -----------------------------------------------------------------
-          Initialize the X and P subspaces if they haven't
-          already been given values. This would be indicated
-          by the condition 'iter == -1'
-      -----------------------------------------------------------------
-      */
-      if (iter == -1)  {
-          if (log) problem_.logger().print_progress_note("Initializing subspaces", -1);
-          if (verbose >= 2) stdout_logger.print_progress_note("Initializing subspaces", -1);
-          this->initialize_XP_subspaces();
-          iter++;
+  for (FASTEIG_INT iter = 0; iter < maxiter; ++iter) {
+    if (!ritz.values.allFinite() || !ritz.relative_residuals.allFinite()) {
+      throw std::runtime_error("LOBPCGSolver: non-finite Ritz values or residuals.");
+    }
+    if (ritz.relative_residuals.maxCoeff() <= tol) break;
+
+    // 2. Soft locking: retain every X in Rayleigh--Ritz, but expand only with
+    // residuals of unconverged pairs. No preconditioner is applied yet (W=R).
+    // Unlike hard locking, a pair can become active again after a Ritz update.
+    std::vector<FASTEIG_INT> active;
+    for (FASTEIG_INT j = 0; j < nev; ++j) {
+      if (ritz.relative_residuals(j) > tol) active.push_back(j);
+    }
+    const FASTEIG_INT active_count = static_cast<FASTEIG_INT>(active.size());
+    auto W_source = exec->create_multivector(n, active_count);
+    for (FASTEIG_INT j = 0; j < active_count; ++j) {
+      W_source->copy_columns_from(j, *residuals, active[j], 1);
+    }
+
+    // 3. Form an orthonormal basis of span{X,W,P}. Restore X orthogonality to
+    // avoid accumulated Ritz rotations corrupting the standard projection.
+    // The shared block routine drops dependent directions and reorthogonalizes
+    // after normalization; it never completes a vanished residual with noise.
+    if (core::thin_qr_in_place(*X, qr_factor, core::QrMethod::Householder) != 0) {
+      throw std::runtime_error("LOBPCGSolver: Ritz-vector QR failed.");
+    }
+    basis->copy_columns_from(0, *X, 0, nev);
+    FASTEIG_INT subspace_cols = nev;
+    auto W = core::orthonormalize_block(*basis, subspace_cols, *W_source);
+    if (W) {
+      basis->copy_columns_from(subspace_cols, *W, 0, W->cols());
+      subspace_cols += W->cols();
+    }
+    if (P && subspace_cols < capacity) {
+      auto P_source = exec->create_multivector(n, active_count);
+      for (FASTEIG_INT j = 0; j < active_count; ++j) {
+        P_source->copy_columns_from(j, *P, active[j], 1);
       }
-
-      int k = iter;
-
-      /*
-      -----------------------------------------------------------------
-          Preconditioning and residual orthogonalization
-      -----------------------------------------------------------------
-      */
-
-      // Apply custom preconditioner to the residual if one is defined in ops
-  //Chao
-  //    if (ops.precond) {
-  //        ops.precond(W);
-  //    // Otherwise, default to a diagonal preconditoned
-  //    } else {
-  //        // TODO!
-  //    }
-
-      // Orthogonalize W against [X P]
-      if (use_orth)       ortho(W, XP, orth_tol);
-
-      // Update matrix-vector product A*W
-      AW = apply_operator(W);
-
-      /*
-      -----------------------------------------------------------------
-          RR Step
-      -----------------------------------------------------------------
-      */
-
-      // Attempt RR step without orthogonalization
-      bool needs_orth = this->modified_rayleigh_ritz();
-
-
-      // If the RR step failed due to poor conditioning of S'S, orthogonalize W against [X P]
-      if (!use_orth && needs_orth) {
-          // Orthogonalizing W against [X P]
-          string orth_message = "Orthogonalizing W";
-          if (log) problem_.logger().print_progress_note(orth_message, k+1);
-          if (verbose >= 2) stdout_logger.print_progress_note(orth_message, k+1);
-          ortho(W, XP, orth_tol);
-          // Recompute AW
-          AW = apply_operator(W);
-          // Re-run RR step
-          this->modified_rayleigh_ritz();
-          // Set use_orth = true so we orthogonalize W against [X P]
-          // from here on out. The condition number of S generally grows
-          // monotonically, so once it exceeds the threshold for the first
-          // time, it will likely remain above the threshold thereafter.
-          use_orth = true;
+      auto P_orthogonal = core::orthonormalize_block(*basis, subspace_cols, *P_source);
+      if (P_orthogonal) {
+        basis->copy_columns_from(subspace_cols, *P_orthogonal, 0, P_orthogonal->cols());
+        subspace_cols += P_orthogonal->cols();
       }
+    }
 
-      // Updated residual vectors
-      // Recall that after locking, W_k only stores the residual vectors of
-      // *unconverged* vectors. This is why we need to take a block of X, AX, and lam,
-      // which store both the converged and unconverged vectors.
-      auto lam_unconv = lam.tail(b-b_conv);
-      auto X_unconv = XP.middleCols(b_conv,b-b_conv);
-      auto AX_unconv = AXP.middleCols(b_conv,b-b_conv);
-      W.noalias()  = AX_unconv - X_unconv * lam_unconv.asDiagonal();
+    // 4. Rayleigh--Ritz in S=[X,W,P]. Refresh A*S after orthogonalization so
+    // residuals are based on the actual current basis, not drifting cached A*X.
+    // Only the <=3*nev projection and Ritz coefficients live on the host.
+    core::apply_block(effective_op, *basis, 0, subspace_cols, *operator_basis);
+    projected = core::transpose_multiply(*basis, subspace_cols, *operator_basis, subspace_cols);
+    ritz = core::extract_projected_ritz_pairs(
+        projected, *basis, *operator_basis, subspace_cols, nev, "sr",
+        *X, *AX, *residuals, "LOBPCGSolver");
+    if (!ritz.values.allFinite() || !ritz.relative_residuals.allFinite()) {
+      throw std::runtime_error("LOBPCGSolver: non-finite Ritz values or residuals.");
+    }
 
-      /*
-      -----------------------------------------------------------------
-          Post Processing
-      -----------------------------------------------------------------
-      */
-      // Compute residual norms (used for convergence + optional progress output).
-      for (int j = 0; j < b; j++) {
-          const double num = (AXP.col(j) - lam(j) * XP.col(j)).norm();
-          const double denom = (1.0 + abs(lam(j))) * XP.col(j).norm();
-          resnorms(j) = (denom > 0.0) ? (num / denom) : num;
-      }
+    // 5. Keep the locally optimal search directions:
+    // X_new = X_old*C_X + W*C_W + P_old*C_P,
+    // P_new = W*C_W + P_old*C_P. They are orthogonalized on the next iteration.
+    // Zeroing C_X implements this with the same executor GEMM as the Ritz build.
+    if (!P) P = exec->create_multivector(n, nev);
+    MatrixXd direction_coefficients = ritz.coefficients;
+    direction_coefficients.topRows(nev).setZero();
+    basis->right_multiply_active_columns(subspace_cols, direction_coefficients, *P);
 
-      // Convergence progress update
-      const bool do_progress = (print_every > 0) && (((k + 1) % print_every) == 0);
-      if (do_progress) {
-          // Always write progress to file if a log stream is provided.
-          if (log) {
-              problem_.logger().print_convergence_data(lam, resnorms, k + 1);
-          }
-          // Optionally print progress to stdout based on verbosity.
-          if (verbose >= 2) {
-              stdout_logger.print_convergence_data(lam, resnorms, k + 1);
-          }
-      }
-
-      // Expose current eigenvector estimates to the caller.
-      V.noalias() = XP.leftCols(b);
-
-      // Update iteration counter
-      iter++;
-
-      // Stop as soon as all requested eigenpairs are converged.
-      const int nev_i = std::min(static_cast<int>(nev), static_cast<int>(b));
-      if (nev_i > 0 && resnorms.head(nev_i).maxCoeff() < conv_tol) break;
+    // 6. Check true relative residuals and report original eigenvalues.
+    it_done = static_cast<long long>(iter + 1);
+    const bool converged = ritz.relative_residuals.maxCoeff() <= tol;
+    const bool exhausted = subspace_cols == nev;
+    if (print_every > 0 && ((iter + 1) % print_every == 0 || converged || exhausted || iter + 1 == maxiter)) {
+      core::LanczosSnapshot snapshot;
+      snapshot.lam = ritz.values;
+      if (flip_sign) snapshot.lam *= -1.0;
+      snapshot.rel_res = ritz.relative_residuals;
+      core::lanczos_emit_snapshot(snapshot, iter + 1, log_logger, console_logger);
+    }
+    if (converged || exhausted) break;
   }
-  set_iterations(iter < 0 ? 0 : static_cast<long long>(iter));
-  if (flip_sign) {
-    lam *= -1.0;
-  }
-  compute_final_residual_norms();
+
+  // Transfer the requested vectors only once, at the public result boundary.
+  eigvals_ = ritz.values;
+  if (flip_sign) eigvals_ *= -1.0;
+  eigvecs_ = X->copy_to_host();
+  resnrms_ = ritz.relative_residuals;
+  set_iterations(it_done);
   return status_;
-}
-
-/*
- * Assigns the initial values to the X and P subspaces.
- * - The Rayleigh Ritz step is applied to the initial X to
- *   orthogonalize it and get an initial set of Ritz values
- * - The P subspace is filled with random Gaussian vectors.
- *   This makes the code more uniform, as we don't need to
- *   treat the first iteration separately, and these random
- *   vectors can only help with convergence.
- */
-void LOBPCGSolver::initialize_XP_subspaces() {
-
-    // Block of S and AS storing the eigenvalue estimates
-    auto X  =  XP.leftCols(b);
-    auto AX = AXP.leftCols(b);
-
-    // Copy V to X
-    X.noalias() = V;
-
-    // Initial matrix-vector product A*X
-    // Note:    Putting the result in AW initially, as this has type
-    //          MatrixXd, whereas AX as defined above has type Block<...>.
-    //          block_matvec() expected MatrixXd variables as arguments.
-    //          Nothing is stored in AW currently, and it will be overwritten
-    //          before we need to use it again.
-    AW = apply_operator(X);
-    AX.noalias() = AW;
-
-    // Initial orthogonalization via RR step
-    // See modified_rayleigh_ritz() function below for more
-    // details of what's happening here.
-    // Overlap matrices
-    MatrixXd XtX = X.transpose() * X;
-    MatrixXd XtAX = X.transpose() * AX;
-    // Cholesky decomp of XtX to convert to standard eigenproblem
-    LLT<Ref<MatrixXd>,Lower> chol(XtX);
-    auto Rt = XtX.triangularView<Lower>();
-    Rt.solveInPlace(XtAX);
-    Rt.solveInPlace(XtAX.transpose());
-    // Solve projected eigenproblem
-    eigsolver.compute(XtAX);
-    auto C = eigsolver.eigenvectors();
-    // Convert back to original system
-    Rt.transpose().solveInPlace(C);
-
-    // Initial eigenvalue and eigenvector estimates
-    lam.noalias() = eigsolver.eigenvalues();
-    X.applyOnTheRight(C);
-    AX.applyOnTheRight(C);
-
-    // Initial residual W
-    W.noalias() = AX - X * lam.asDiagonal();
-
-    // Initial P --- fill with random unit vectors
-    // This makes the subsequent code simpler and easier to read,
-    // and these random vectors can only help with convergence.
-    XP.rightCols(b).setRandom();
-    for (int i = 0; i < b; i++) {
-        XP.col(b+i) /= XP.col(b+i).norm();
-    }
-    // Initial AP
-    auto P = XP.rightCols(b);
-    AW = apply_operator(P);
-    AXP.rightCols(b).noalias() = AW;
-
-}
-
-MatrixXd LOBPCGSolver::apply_operator(const Eigen::Ref<const MatrixXd>& X) const {
-    if (!effective_op_) {
-        throw std::logic_error("LOBPCGSolver::apply_operator: operator is not initialized.");
-    }
-    return core::apply_to_host(*effective_op_, X);
-}
-
-/*
- * Locks eigenvectors that have converged during LOBPCG iteration.
- *
- */
-void LOBPCGSolver::lock_eigenvectors() {
-
-    int lock = 0;
-
-    // Count the number of new eigenpairs to lock (may be multiple)
-    for (int i = 0; i < b - b_conv; i++) {
-
-        int j = i + b_conv;
-
-        // Compute residual norm |Ax_j / lam_j - x_j | / |x_j|
-        double num = (AXP.col(j) - lam(j)*XP.col(j)).norm();
-        double denom = (1+abs(lam(j)))*XP.col(j).norm();
-        resnorms(j) = num/denom;
-
-        // Check for convergence
-        if (resnorms(j) < conv_tol) {
-            lock++;
-        }
-
-        // Break otherwise, as we lock eigenpairs in order
-        else {
-            break;
-        }
-    }
-
-    if (lock > 0) {
-
-        // Progress note about locking eigenvectors
-        for (int l = 0; l < lock; l++) {
-            if (log) problem_.logger().print_locking_note(b_conv+1+l, iter+1);
-            if (verbose >= 2) {
-                fasteig_logger stdout_logger;
-                stdout_logger.attach(&std::cout);
-                stdout_logger.print_locking_note(b_conv+1+l, iter+1);
-            }
-        }
-
-        // Discard columns of P and W corresponding to locked eigenpairs.
-        // Only needed if there are still unconverged vectors remaining.
-        if (b_conv + lock < b) {
-            // Number of unconverged eigenvectors remaining before/after locking update
-            int u_pre_lock = b - b_conv;
-            int u_post_lock = u_pre_lock - lock;
-
-            // Shifting P & W in memory
-            //  Before: S = [ X=S(:,1:b) P(:,:lock) P(:,lock:) W(:,:lock) W(:,lock:) ]
-            //   After: S = [ X=S(:,1:b) P(:,lock:) W(:,lock:) ]
-            // Shift P/AP (keep only unconverged columns at the end).
-            // Note the use of .eval() due to aliasing.
-            XP.rightCols(u_post_lock) = XP.rightCols(u_pre_lock).rightCols(u_post_lock).eval();
-            AXP.rightCols(u_post_lock) = AXP.rightCols(u_pre_lock).rightCols(u_post_lock).eval();
-            // Shift W & AW
-            W  = W.rightCols(u_post_lock).eval();
-            AW = AW.rightCols(u_post_lock).eval();
-        }
-
-        // Officially update b_conv
-        b_conv += lock;
-    }
-}
-
-void LOBPCGSolver::svqb(MatrixXd& U, double tau, char method) {
-    MatrixXd overlap = U.transpose() * U;
-
-    VectorXd d = overlap.diagonal();
-    d = d.array().sqrt().inverse();
-    const auto D = d.asDiagonal();
-    overlap.applyOnTheLeft(D);
-    overlap.applyOnTheRight(D);
-
-    eigsolver.compute(overlap);
-    VectorXd theta = eigsolver.eigenvalues();
-    const MatrixXd Z = eigsolver.eigenvectors();
-
-    const double threshold = tau * theta.lpNorm<Infinity>();
-    const double newval = (method == 'R') ? threshold : 0.0;
-    theta = (theta.array() < threshold).select(newval, theta);
-    theta = theta.array().sqrt().inverse();
-    theta = theta.array().isInf().select(0, theta);
-
-    U.applyOnTheRight(D);
-    U.applyOnTheRight(Z);
-    U.applyOnTheRight(theta.asDiagonal());
-}
-
-void LOBPCGSolver::ortho(MatrixXd& U,
-                         const MatrixXd& V,
-                         double tol,
-                         int maxiter1,
-                         int maxiter2,
-                         double tau) {
-    const int block_size = U.cols();
-    const MatrixXd identity = MatrixXd::Identity(block_size, block_size);
-
-    double normU = U.norm();
-    for (int i = 0; i < maxiter1; ++i) {
-        U = U - V * (V.transpose() * U);
-
-        for (int j = 0; j < maxiter2; ++j) {
-            svqb(U, tau, (j == 0) ? 'R' : 'D');
-            normU = U.norm();
-            const double orth_err = (U.transpose() * U - identity).norm();
-            if (orth_err < tol * normU) break;
-        }
-
-        const double orth_err = (V.transpose() * U).norm();
-        if (orth_err < tol * normU) break;
-    }
-}
-
-bool LOBPCGSolver::modified_rayleigh_ritz() {
-
-    /*
-    ---------------------------------------------------------------------
-        Overlap matrix S'AS = [ [ XP' AXP   XP' AW ]
-                                [ W'  AXP    W' AW ] ]
-
-        Assumes AXP and AW have already been computed.
-    ---------------------------------------------------------------------
-    */
-
-    // Subspace sizes, accounting for locked eigenvectors
-    int n_cols_XP = 2*b - b_conv;
-    int n_cols_W  =   b - b_conv;
-
-    // Computing the A-overlap matrix block by block
-    // XP' AXP
-    StAS.topLeftCorner(n_cols_XP,n_cols_XP).noalias() = XP.transpose() * AXP;
-    // XP' AW   &   W' AXP = AW' XP
-    auto tmp = XP.transpose() * AW;
-    StAS.topRightCorner(n_cols_XP, n_cols_W).noalias() = XP.transpose() * AW;
-    StAS.bottomLeftCorner(n_cols_W, n_cols_XP).noalias() = StAS.topRightCorner(n_cols_XP, n_cols_W).transpose();
-    // W' AW
-    StAS.bottomRightCorner(n_cols_W,n_cols_W).noalias() = W.transpose() * AW;
-
-    /*
-    ---------------------------------------------------------------------
-        Conversion to standard eigenproblem
-    ---------------------------------------------------------------------
-    */
-
-    VectorXd d;
-
-    if (!use_orth) {
-
-        // Overlap matrix S'S = [ [ XP' XP   XP' W ]
-        //                        [ W'  XP    W' W ] ]
-        // XP' XP
-        StS.topLeftCorner(n_cols_XP,n_cols_XP).noalias() = XP.transpose() * XP;
-        // XP' W   &   W' XP  =  XP' W
-        StS.topRightCorner(n_cols_XP, n_cols_W).noalias() = XP.transpose() * W;
-        StS.bottomLeftCorner(n_cols_W, n_cols_XP).noalias() = StS.topRightCorner(n_cols_XP, n_cols_W).transpose();
-        // W' W
-        StS.bottomRightCorner(n_cols_W,n_cols_W).noalias() = W.transpose() * W;
-
-        // Rescale by norms of the columns of S, currently stored
-        // on the diagonal of StS
-        d = StS.diagonal();
-        d = d.array().sqrt().inverse();
-        auto D = d.asDiagonal();
-        StS.applyOnTheLeft(D);
-        StS.applyOnTheRight(D);
-        // Apply to StAS as well
-        StAS.applyOnTheLeft(D);
-        StAS.applyOnTheRight(D);
-
-        // In-place Cholesky factorization of Rt * R = StS
-        // Note 1: We can do this in-place, editing StS, as we
-        //         don't need StS again afterwards
-        // Note 2: Using type Ref<MatrixXd> instead of MatrixXd makes
-        //         this an inplace operator
-        LLT<Ref<MatrixXd>,Lower> chol(StS);
-
-        // Condition number of Rt
-        // Because Rt is lower triangular, cond(Rt) is the ratio of the max
-        // and min diagonal elements of Rt. We did the cholesky decom in-place,
-        // so diag(Rt) is stored in diag(StS) currently.
-        double rdmax = StS.diagonal().maxCoeff();
-        double rdmin = StS.diagonal().minCoeff();
-        double cond = rdmax / rdmin;
-
-        // If Rt is too poorly conditioned, return 'true' immediately to tell
-        // calling function lobpcg() to orthogonalize W
-        double tau_skip = 1 / orth_tol;
-        if (tau_skip > 0 && cond > tau_skip) {
-            return true;
-        }
-
-        // View for factor L in the decomposition
-        auto Rt = StS.triangularView<Lower>();
-
-        // Convert from generalized eigenproblem (S'AS, S'S)
-        // to standard eigenproblem (Rt^{-1}) S'AS (R^{-1})
-        Rt.solveInPlace(StAS);
-        Rt.solveInPlace(StAS.transpose());
-    }
-
-    /*
-    ---------------------------------------------------------------------
-        Solve projected eigenproblem
-    ---------------------------------------------------------------------
-    */
-    eigsolver.compute(StAS);
-    auto Z = eigsolver.eigenvectors();
-
-    /*
-    ---------------------------------------------------------------------
-        Subspace Modification
-
-    Modifying columns Z(:,u:2u) based on Z1_perp = Z(:u,u:) sub-block.
-    c.f. Section 4.2 of C. Yang (2018) for more details.
-
-
-    Z =  | Z1  Z1_perp |            Z1 : b x b      Z1_perp : b  x 2u
-         | Z2  Z2_perp |            Z2 : u x b      Z2_perp : 2u x 2u
-                                         u = b - b_conv
-
-    We want to modify Z1_perp(:,:u) and Z2_perp(:,:u) based on Z1_perp.
-    This implicitly causes the Ritz vectors forming the updated P subspace
-    to be orthogonal to the un-updated X subspace.
-
-    ---------------------------------------------------------------------
-    */
-
-    int u = b - b_conv;  // Number of unconverged eigenvecs
-
-    // LQ decomposition, Z(:u,u:)' = Q' * L'   (this is a u x 2u block)
-    // Note that we can't do this inplace as we'll need the current
-    // value of this block in the subsequent computation
-    auto Z1_perp = Z.topRightCorner(b, 2*u); // nrows = b, ncols = 2u
-    HouseholderQR<MatrixXd> qr(Z1_perp.transpose());
-
-
-    // Z(:,u:2u) <- Z(:,u:2u) * Q'(:,:u)
-    // Note that Q' = qr.householderQ() represents a full 2b x 2b matrix,
-    // but this matrix isn't representationed explicitly. Instead, it is
-    // represented under-the-hood via Householder reflectors. I'm not sure
-    // how to extract apply only the left b columns of Q', so instead I
-    // just apply the full Q' to the right of Z(:,u:3u). This gives us
-    // the correct result for Z(:,u:2u), but it also overwrites Z(:,2u:3u).
-    // Luckily we don't need this anymore, so this is OK. There is some
-    // wasted computational overhead though.
-    auto Z_perp = Z.rightCols(2*u);
-    Z_perp.applyOnTheRight(qr.householderQ());
-
-    /*
-    -----------------------------------------------------------------------
-        Cleaning up
-    -----------------------------------------------------------------------
-    */
-
-    // Copy Ritz coefficients to output matrix C
-    C.noalias() = Z.leftCols(C.cols());
-
-    // Convert back to original eigensystem (A,B) if the original S wasn't orthogonal
-    if (!use_orth) {
-        // C = D * (Rt^{-1})' * Z
-        auto Rt = StS.triangularView<Lower>();
-        Rt.transpose().solveInPlace(C);
-        C.applyOnTheLeft(d.asDiagonal());
-    }
-
-    // Update subspaces X & P
-    XP.applyOnTheRight(C.topRows(n_cols_XP));
-    XP.noalias() +=  W * C.bottomRows(n_cols_W);
-    // Update AX & AP in the same way
-    AXP.applyOnTheRight(C.topRows(n_cols_XP));
-    AXP.noalias() += AW * C.bottomRows(n_cols_W);
-
-    // Copy the Ritz values for eigenvalues to lam
-    lam.noalias() = eigsolver.eigenvalues().head(b);
-
-    return use_orth;
 }
 
 }  // namespace fasteig

@@ -4,8 +4,6 @@
 #include "fasteig_options.hpp"
 #include "parseinput.hpp"
 #include "fasteig_problem.hpp"
-//DMR
-
 #include <algorithm>
 #include <cctype>
 #include <iostream>
@@ -79,7 +77,8 @@ int main(int argc, const char* argv[])
   if (gpu_exec && (solver_l == "lanczos" || solver_l == "gpulanczos" ||
                    solver_l == "blocklanczos" || solver_l == "gpublocklanczos" ||
                    solver_l == "krylovschur" || solver_l == "blockkrylovschur" ||
-                   solver_l == "davidson")) {
+                   solver_l == "davidson" || solver_l == "chebyshev" ||
+                   solver_l == "lobpcg")) {
     if (solver_l == "gpulanczos") {
       opts.set("solver", "Lanczos");
     } else if (solver_l == "gpublocklanczos") {

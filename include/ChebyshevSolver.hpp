@@ -8,6 +8,7 @@ namespace fasteig {
 
 namespace core {
 class LinearOperator;
+class MultiVector;
 }  // namespace core
 
 class ChebyshevSolver final : public fasteig_solver {
@@ -20,11 +21,12 @@ public:
 
 private:
   static void chebyshev_filter(const core::LinearOperator& op,
-                               MatrixXd& V,
+                               core::MultiVector& vectors,
+                               core::MultiVector& previous,
+                               core::MultiVector& scratch,
                                FASTEIG_INT degree,
                                FASTEIG_DOUBLE lambda_min,
-                               FASTEIG_DOUBLE lambda_max,
-                               bool flip_sign);
+                               FASTEIG_DOUBLE lambda_max);
 };
 
 }  // namespace fasteig

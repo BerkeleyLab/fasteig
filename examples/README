@@ -3,14 +3,23 @@ With `USE_CUDA=1`, `runfasteig_gpu` is also built.
 CPU/GPU executable behavior:
 - Use the same input deck for CPU and GPU runs.
 - Keep `solver Lanczos`, `BlockLanczos`, `KrylovSchur`, `BlockKrylovSchur`,
-  or `Davidson` in the input deck.
+  `Davidson`, `Chebyshev`, or `LOBPCG` in the input deck.
 - Run `./runfasteig_cpu inputfile` to select the CPU executor.
 - Run `./runfasteig_gpu inputfile` to select the CUDA executor.
 - These CUDA paths currently support stored MatrixMarket/CSR standard
   eigenproblems. Generalized Krylov--Schur and matrix-free problems should use
   `runfasteig_cpu` for now. CUDA `which SAI` is supported by scalar Lanczos and
-  Krylov--Schur when NVIDIA cuDSS is available; the block methods and Davidson
+  Krylov--Schur when NVIDIA cuDSS is available; the block methods, Davidson, Chebyshev, and LOBPCG
   do not support `SAI`.
+Chebyshev uses `which SR` or `which LR` on both CPU and CUDA. Its filter,
+orthogonalization, and large Ritz/residual blocks stay in executor memory;
+the small projected eigensolve runs on the host through the shared core code.
+Use a fixed `seed` to reproduce the initial block on both executors.
+LOBPCG also supports `which SR` and `which LR` for standard problems on CPU/CUDA.
+Its block width is `nev`; `blksize` does not change it. The X/W/P blocks,
+orthogonalization, operator products, Ritz-vector updates, and residuals use
+executor memory, with only small projections/coefficients handled on the host.
+No preconditioner is currently applied. Other `which` values are rejected.
 macOS quick start (local build)
 1) Install Eigen headers (Homebrew):
    `brew install eigen`
