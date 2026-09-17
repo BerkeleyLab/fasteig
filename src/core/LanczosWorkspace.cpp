@@ -85,9 +85,10 @@ LanczosSnapshot CpuLanczosWorkspace::compute_block_snapshot(FASTEIG_INT block_co
                                                             FASTEIG_INT nev,
                                                             const std::string& which,
                                                             bool need_vectors,
-                                                            const char* solver_name) {
+                                                            const char* solver_name,
+                                                             FASTEIG_INT active_dim) {
   return block_lanczos_compute_cpu_snapshot(T_, block_count, block_size, nev, beta_block_,
-                                            which, need_vectors, solver_name);
+                                            which, need_vectors, solver_name, active_dim);
 }
 
 void CpuLanczosWorkspace::prepare_krylov_schur_restart(
@@ -110,25 +111,26 @@ void CpuLanczosWorkspace::prepare_block_krylov_schur_restart(
     const VectorXd& retained_values,
     const MatrixXd& coupling_block,
     const char* solver_name) {
-  if (block_size <= 0 || retained_values.size() != block_size ||
-      coupling_block.rows() != block_size || coupling_block.cols() != block_size) {
+  const FASTEIG_INT retained = retained_values.size();
+  if (block_size <= 0 || retained <= 0 || retained % block_size != 0 ||
+      coupling_block.rows() != block_size || coupling_block.cols() != retained) {
     throw std::invalid_argument(std::string(solver_name) +
                                 ": invalid block Krylov-Schur restart data.");
   }
-  if (2 * block_size > T_.rows() || 2 * block_size > T_.cols()) {
+  if (retained + block_size > T_.rows() || retained + block_size > T_.cols()) {
     throw std::invalid_argument(std::string(solver_name) +
                                 ": projected matrix is too small for block restart.");
   }
 
   T_.setZero();
-  T_.topLeftCorner(static_cast<int>(block_size), static_cast<int>(block_size)) =
+  T_.topLeftCorner(static_cast<int>(retained), static_cast<int>(retained)) =
       retained_values.asDiagonal();
-  T_.block(static_cast<int>(block_size), 0,
-           static_cast<int>(block_size), static_cast<int>(block_size)) = coupling_block;
-  T_.block(0, static_cast<int>(block_size),
-           static_cast<int>(block_size), static_cast<int>(block_size)) =
+  T_.block(static_cast<int>(retained), 0,
+           static_cast<int>(block_size), static_cast<int>(retained)) = coupling_block;
+  T_.block(0, static_cast<int>(retained),
+           static_cast<int>(retained), static_cast<int>(block_size)) =
       coupling_block.transpose();
-  beta_block_ = coupling_block;
+  beta_block_.resize(0, 0);  // Set by the next expanded block before extraction.
   restart_coupling_row_ = -1;
 }
 

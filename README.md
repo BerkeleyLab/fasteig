@@ -328,11 +328,79 @@ tol     1e-6
 
 The GPU executable dispatches `Lanczos`, `BlockLanczos`, `KrylovSchur`,
 `BlockKrylovSchur`, `Davidson`, `Chebyshev`, and `LOBPCG` through the CUDA executor. These CUDA paths
-currently support standard stored-matrix problems; generalized Krylov–Schur
-remains host-only.
+support standard stored-matrix problems. `Lanczos`, `BlockLanczos`, `KrylovSchur`,
+and `BlockKrylovSchur` also support generalized `A*x = lambda*B*x` on CPU and CUDA
+for `SR`, `LR`, `SM`, `LM`, and `BE`, with symmetric A and symmetric positive-definite
+B. Generalized `SAI` is supported by `KrylovSchur` only. Other solvers still require
+standard problems.
 
-CUDA `which SAI` is available for scalar Lanczos and Krylov–Schur and requires
-NVIDIA cuDSS. The block methods, Davidson, Chebyshev, and LOBPCG do not support `SAI`.
+`which SAI` is available for `Lanczos`, `BlockLanczos`, `KrylovSchur`, and
+`BlockKrylovSchur` on standard problems. It targets the eigenvalues nearest
+`shift` by applying `(A - shift*I)^-1`; the factorization is reused throughout
+the solve, including restarts. CUDA requires NVIDIA cuDSS; CPU uses the existing
+MKL PardisoLDLT or Eigen SimplicialLDLT backend. Davidson, Chebyshev, and LOBPCG
+do not support `SAI`.
+
+For any of these generalized Krylov solvers, add `bmatrix path/to/B.mtx`. Ordinary selection
+uses `B^-1 A` with one B factorization. In Krylov–Schur, `which SAI` uses
+`(A - shift*B)^-1 B`, factors only `A - shift*B`, and returns eigenvalues nearest
+the shift. CUDA requires cuDSS for **all** generalized choices, not only SAI.
+The shifted matrix may be indefinite; the CUDA path reuses cuDSS General/Full.
+A singular shift is not supported. Indefinite or singular B is not supported.
+
+Both executors use B-inner-product orthogonalization and rotate Q and BQ at
+restart. The basis, BQ, projected matrix, and candidate eigenvectors stay on the
+selected executor. Setup diagnostics precede progress, and total runtime includes
+factorization. Progress residuals are projected operator estimates (in the B
+inner product for generalized problems); convergence is verified using the original
+relative residual `||A*x-lambda*B*x|| / ((1+|lambda|)*||B*x||)`. The same formula
+is used in the final table. Very tight requested tolerances may be unattainable
+for ill-conditioned B or a shift very close to an eigenvalue. If generalized
+Krylov solvers reach their limit without satisfying `tol`, they return status 1
+(the driver exits with code 2) and still print the best available eigenpairs.
+
+Generalized block solvers use B-weighted block Gram–Schmidt and Cholesky QR:
+`G = Z^T B Z = R^T R`, `Q = Z R^-1`. Rank loss triggers reorthogonalization and
+deterministic completion of missing basis directions. Restarted methods retain
+both Q and BQ. At full dimension, padded columns of a partial last block are excluded from
+the projected eigensolve. Large blocks remain on the executor; small Gram,
+projection, and rank-decision data may be copied to the host.
+
+`maxdim` can enlarge the Krylov–Schur restart window above its minimum of
+`max(20, 2*nev)` (capped at the matrix dimension). Direct `SM` is supported but
+may converge slowly for interior eigenvalues; SAI near zero often helps.
+
+For example, keep the same deck for `runfasteig_cpu` and `runfasteig_gpu`:
+
+```text
+amatrix Sparse_Matrices/SiO.mtx
+solver BlockLanczos
+which SAI
+shift 2
+nev 5
+blksize 5
+maxdim 20
+maxiter 100
+tol 1e-12
+seed 1
+```
+
+Switch `solver` to `BlockKrylovSchur` to use restarts. Block Lanczos uses
+`blksize` and counts block expansions in `maxiter`; Block Krylov–Schur also
+uses `blksize`, independently of `nev`, but counts restart cycles. Its effective
+cycle dimension is `maxdim` rounded down to a multiple of `blksize` (unless
+`maxdim >= n`, which uses the full space, including a partial final block).
+For a restarted run, provide at least `ceil(nev/blksize) + 1` blocks so the
+requested Ritz vectors fit and a full block remains for expansion. It retains
+the requested pairs plus guard Ritz vectors up to roughly half the cycle,
+rounded to whole blocks. A very small cycle can converge slowly: for SiO with
+`nev 5`, `blksize 5`, and `tol 1e-8`, prefer trying `maxdim 40` over `maxdim 10`.
+Block Krylov–Schur verifies the original-problem residuals before accepting
+convergence and returns a nonzero status if the tolerance is not met.
+Both block solvers report backtransformed eigenvalues in SAI progress; the
+progress residuals remain relative estimates for the inverse operator. Final
+eigenpairs are sorted algebraically and final residuals are evaluated against
+the original matrix A.
 
 Chebyshev supports `SR` and `LR` for standard problems on both executors. Its
 filter recurrence, trial blocks, Cholesky QR, deflation, Ritz-vector rotation,

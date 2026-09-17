@@ -72,6 +72,8 @@ $(BUILD_CONFIG_HEADER): force_build_config $(BUILD_TAG_FILE)
 
 COMMON_OBJS = core/Executor.o core/Vector.o core/MultiVector.o core/CsrMatrix.o core/Operations.o core/LegacyOperationsOperator.o core/LanczosWorkspace.o core/KrylovSubspace.o core/Orthogonalization.o core/RitzExtraction.o mmio.o rmmdiis.o SPPC_Ind.o parseinput.o fasteig_solver.o LanczosSolver.o BlockLanczosSolver.o BlockKrylovSchurSolver.o KrylovSchurSolver.o DavidsonSolver.o LOBPCGSolver.o ChebyshevSolver.o SPPCSolver.o RMMDIISSolver.o fasteig_options.o fasteig_problem.o fasteig_logger.o fasteig_version.o
 
+COMMON_OBJS += core/LinearOperator.o
+
 CUDA_OBJS =
 ifeq ($(USE_CUDA),1)
 CUDA_OBJS += gpu/CudaExecutor.o gpu/CudaVector.o gpu/CudaMultiVector.o gpu/CudaCsrMatrix.o gpu/CudaContext.o gpu/CudaLanczosWorkspace.o gpu/CudaLanczosKernels.o

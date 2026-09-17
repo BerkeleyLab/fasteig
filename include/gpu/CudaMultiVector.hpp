@@ -36,7 +36,8 @@ public:
   void column_axpy(double alpha, FASTEIG_INT col, Vector& y) const override;
   double orthogonalize_active_columns(FASTEIG_INT active_cols,
                                       const Vector& source,
-                                      Vector& residual) const override;
+                                      Vector& residual,
+                                      const MultiVector* dual_basis = nullptr) const override;
   void orthogonalize_active_columns(FASTEIG_INT active_cols,
                                     const Vector& source,
                                     Vector& residual,
@@ -58,7 +59,8 @@ public:
                                                   const Vector& source,
                                                   Vector& residual,
                                                   double* d_coeffs,
-                                                  double* d_correction) const;
+                                                  double* d_correction,
+                                                  const CudaMultiVector* dual_basis = nullptr) const;
 
   double* data() noexcept { return d_values_; }
   const double* data() const noexcept { return d_values_; }

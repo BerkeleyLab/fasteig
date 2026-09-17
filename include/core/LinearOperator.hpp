@@ -1,6 +1,7 @@
 #pragma once
 
 #include "fasteig.hpp"
+#include <memory>
 
 namespace fasteig {
 namespace core {
@@ -72,6 +73,29 @@ public:
 private:
   const LinearOperator& op_;
   double scale_ = 1.0;
+};
+
+// Compose operators without exposing matrix storage or the execution device.
+// Cached intermediates live on the common executor; like other operator
+// workspaces, a ProductLinearOperator is not intended for concurrent applies.
+class ProductLinearOperator final : public LinearOperator {
+public:
+  ProductLinearOperator(std::unique_ptr<LinearOperator> left,
+                        std::shared_ptr<const LinearOperator> right);
+  ~ProductLinearOperator() override;
+  const Executor& executor() const noexcept override { return left_->executor(); }
+  FASTEIG_INT rows() const noexcept override { return left_->rows(); }
+  FASTEIG_INT cols() const noexcept override { return right_->cols(); }
+  void apply(const Vector& x, Vector& y, double alpha = 1.0, double beta = 0.0) const override;
+  void apply_column(const MultiVector& X, FASTEIG_INT col, Vector& y,
+                    double alpha = 1.0, double beta = 0.0) const override;
+  void apply_block(const MultiVector& X, FASTEIG_INT first_col, FASTEIG_INT block_size,
+                   MultiVector& Y, double alpha = 1.0, double beta = 0.0) const override;
+private:
+  std::unique_ptr<LinearOperator> left_;
+  std::shared_ptr<const LinearOperator> right_;
+  std::unique_ptr<Vector> intermediate_;
+  mutable std::unique_ptr<MultiVector> block_intermediate_;
 };
 
 }  // namespace core

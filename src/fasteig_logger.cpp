@@ -472,3 +472,28 @@ void fasteig_logger::print_final_results(FASTEIG_INT status,
   *os << "\n";
 }
 
+void fasteig_logger::print_factorization_setup(const std::string& backend,
+                                               const std::string& matrix,
+                                               std::optional<double> shift,
+                                               double analysis_sec,
+                                               double factorization_sec,
+                                               double setup_sec,
+                                               std::optional<double> matrix_setup_sec) {
+  if (!enabled()) return;
+  section(shift ? "SAI SETUP" : "GENERALIZED SETUP");
+  auto field = [&](const char* key, const auto& value) {
+    std::ostringstream os;
+    os << "  " << std::left << std::setw(23) << key << ": "
+       << std::fixed << std::setprecision(6) << value;
+    line(os.str());
+  };
+  field("Factorization Backend", backend);
+  field("Factorized Matrix", matrix);
+  if (shift) field("Shift", *shift);
+  if (matrix_setup_sec) field("Matrix Setup (sec)", *matrix_setup_sec);
+  field("Analyze Pattern (sec)", analysis_sec);
+  field("Factorization (sec)", factorization_sec);
+  field(shift ? "SAI Setup Total (sec)" : "B Setup Total (sec)", setup_sec);
+  line();
+}
+

@@ -198,7 +198,8 @@ LanczosSnapshot CudaLanczosWorkspace::compute_block_snapshot(FASTEIG_INT block_c
                                                              FASTEIG_INT nev,
                                                              const std::string& which,
                                                              bool need_vectors,
-                                                             const char* solver_name) {
+                                                             const char* solver_name,
+                                                             FASTEIG_INT active_dim) {
   if (block_count <= 0 || block_size <= 0) {
     throw std::invalid_argument("CudaLanczosWorkspace::compute_block_snapshot: invalid block count/size.");
   }
@@ -206,14 +207,15 @@ LanczosSnapshot CudaLanczosWorkspace::compute_block_snapshot(FASTEIG_INT block_c
     throw std::invalid_argument("CudaLanczosWorkspace::compute_block_snapshot: beta block is not initialized.");
   }
 
-  const FASTEIG_INT m = block_count * block_size;
-  if (m <= 0 || m > maxiter_) {
+  const FASTEIG_INT m = active_dim > 0 ? active_dim : block_count * block_size;
+  if (m <= (block_count - 1) * block_size || m > block_count * block_size || m > maxiter_) {
     throw std::invalid_argument("CudaLanczosWorkspace::compute_block_snapshot: invalid snapshot size.");
   }
 
   auto& context = cuda_executor_from(exec_, "CudaLanczosWorkspace::compute_block_snapshot").context();
   const int m_i = static_cast<int>(m);
   const int b_i = static_cast<int>(block_size);
+  const int tail = static_cast<int>(m - (block_count - 1) * block_size);
 
   FASTEIG_CUDA_CHECK(cudaMemcpy2DAsync(
       d_snapshot_T_, static_cast<std::size_t>(m_i) * sizeof(double),
@@ -244,13 +246,13 @@ LanczosSnapshot CudaLanczosWorkspace::compute_block_snapshot(FASTEIG_INT block_c
                                            static_cast<std::size_t>(m_i) * sizeof(double),
                                        cudaMemcpyDeviceToHost, context.stream()));
   } else {
-    last_block.resize(b_i, m_i);
+    last_block.setZero(b_i, m_i);
     FASTEIG_CUDA_CHECK(cudaMemcpy2DAsync(
         last_block.data(),
         static_cast<std::size_t>(b_i) * sizeof(double),
-        d_snapshot_T_ + static_cast<std::size_t>(m_i - b_i),
+        d_snapshot_T_ + static_cast<std::size_t>(m_i - tail),
         static_cast<std::size_t>(m_i) * sizeof(double),
-        static_cast<std::size_t>(b_i) * sizeof(double),
+        static_cast<std::size_t>(tail) * sizeof(double),
         static_cast<std::size_t>(m_i),
         cudaMemcpyDeviceToHost,
         context.stream()));
@@ -295,12 +297,13 @@ void CudaLanczosWorkspace::prepare_block_krylov_schur_restart(
     const VectorXd& retained_values,
     const MatrixXd& coupling_block,
     const char* solver_name) {
-  if (block_size <= 0 || retained_values.size() != block_size ||
-      coupling_block.rows() != block_size || coupling_block.cols() != block_size) {
+  const FASTEIG_INT retained = retained_values.size();
+  if (block_size <= 0 || retained <= 0 || retained % block_size != 0 ||
+      coupling_block.rows() != block_size || coupling_block.cols() != retained) {
     throw std::invalid_argument(std::string(solver_name) +
                                 ": invalid block Krylov-Schur restart data.");
   }
-  if (2 * block_size > maxiter_) {
+  if (retained + block_size > maxiter_) {
     throw std::invalid_argument(std::string(solver_name) +
                                 ": projected matrix is too small for block restart.");
   }
@@ -314,13 +317,13 @@ void CudaLanczosWorkspace::prepare_block_krylov_schur_restart(
 
   const MatrixXd diagonal = retained_values.asDiagonal();
   copy_host_block_to_device(d_T_, maxiter_, 0, 0, diagonal, context.stream());
-  copy_host_block_to_device(d_T_, maxiter_, block_size, 0,
+  copy_host_block_to_device(d_T_, maxiter_, retained, 0,
                             coupling_block, context.stream());
   const MatrixXd coupling_transpose = coupling_block.transpose();
-  copy_host_block_to_device(d_T_, maxiter_, 0, block_size,
+  copy_host_block_to_device(d_T_, maxiter_, 0, retained,
                             coupling_transpose, context.stream());
   FASTEIG_CUDA_CHECK(cudaStreamSynchronize(context.stream()));
-  beta_block_ = coupling_block;
+  beta_block_.resize(0, 0);  // Set by the next expanded block before extraction.
   restart_coupling_row_ = -1;
 }
 

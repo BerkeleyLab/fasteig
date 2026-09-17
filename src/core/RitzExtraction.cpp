@@ -13,6 +13,54 @@
 
 namespace fasteig {
 namespace core {
+namespace {
+
+VectorXd shift_invert_eigenvalues(const VectorXd& values,
+                                 FASTEIG_DOUBLE shift,
+                                 const char* solver_name) {
+  VectorXd transformed(values.size());
+  for (int j = 0; j < values.size(); ++j) {
+    if (values(j) == 0.0) {
+      throw std::runtime_error(std::string(solver_name) +
+                               ": SAI encountered a zero shift-invert Ritz value.");
+    }
+    transformed(j) = shift + 1.0 / values(j);
+  }
+  return transformed;
+}
+
+}  // namespace
+
+VectorXd evaluate_ritz_pairs(const LinearOperator& A,
+                             const LinearOperator* B,
+                             const MultiVector& basis,
+                             FASTEIG_INT active_cols,
+                             const LanczosSnapshot& snapshot,
+                             const std::string& which,
+                             double shift,
+                             MultiVector& ritz_vectors,
+                             MultiVector& residuals,
+                             MultiVector& metric_vectors,
+                             VectorXd& eigenvalues) {
+  const auto final = lanczos_prepare_final_snapshot(snapshot, which, shift, "evaluate_ritz_pairs");
+  eigenvalues = final.lam;
+  const FASTEIG_INT count = static_cast<FASTEIG_INT>(eigenvalues.size());
+  basis.right_multiply_active_columns(active_cols, final.Csel, ritz_vectors);
+  apply_block(A, ritz_vectors, 0, count, residuals);
+  if (B) apply_block(*B, ritz_vectors, 0, count, metric_vectors);
+  else metric_vectors.copy_from(ritz_vectors);
+  const VectorXd metric_norms = column_norms(metric_vectors);
+  add_scaled_columns(metric_vectors, -eigenvalues, residuals);
+  VectorXd result = column_norms(residuals);
+  for (int j = 0; j < count; ++j) {
+    const double denominator = (1.0 + std::abs(eigenvalues(j))) * metric_norms(j);
+    if (!(denominator > 0.0) || !std::isfinite(denominator) || !std::isfinite(result(j))) {
+      throw std::runtime_error("evaluate_ritz_pairs: invalid vector or non-finite residual.");
+    }
+    result(j) /= denominator;
+  }
+  return result;
+}
 
 ProjectedRitzPairs extract_projected_ritz_pairs(
     const MatrixXd& projected_matrix,
@@ -107,7 +155,8 @@ void validate_lanczos_which(const std::string& which,
   if (allow_sai && which == "sai") return;
 
   throw std::invalid_argument(std::string(solver_name) +
-                              ": invalid which option (use SR/LR/SM/LM/BE).");
+                              ": invalid which option (use SR/LR/SM/LM/BE" +
+                              (allow_sai ? "/SAI)." : ")."));
 }
 
 std::vector<size_t> lanczos_select_ritz_indices(const VectorXd& eigenvalues,
@@ -227,7 +276,8 @@ LanczosSnapshot block_lanczos_compute_cpu_snapshot(const MatrixXd& T,
                                                    const MatrixXd& beta,
                                                    const std::string& which,
                                                    bool need_vectors,
-                                                   const char* solver_name) {
+                                                   const char* solver_name,
+                                                   FASTEIG_INT active_dim) {
   if (block_count <= 0) {
     throw std::invalid_argument(std::string(solver_name) + ": block snapshot count must be > 0.");
   }
@@ -238,8 +288,9 @@ LanczosSnapshot block_lanczos_compute_cpu_snapshot(const MatrixXd& T,
     throw std::invalid_argument(std::string(solver_name) + ": block snapshot beta shape mismatch.");
   }
 
-  const FASTEIG_INT m = block_count * block_size;
-  if (T.rows() < m || T.cols() < m) {
+  const FASTEIG_INT m = active_dim > 0 ? active_dim : block_count * block_size;
+  if (m <= (block_count - 1) * block_size || m > block_count * block_size ||
+      T.rows() < m || T.cols() < m) {
     throw std::invalid_argument(std::string(solver_name) + ": block snapshot matrix is too small.");
   }
 
@@ -272,8 +323,9 @@ LanczosSnapshot block_lanczos_make_snapshot_from_eigendecomp(const VectorXd& eig
     throw std::invalid_argument(std::string(solver_name) + ": block beta shape mismatch.");
   }
 
-  MatrixXd last_block(static_cast<int>(block_size), m);
-  last_block = eigenvectors.bottomRows(static_cast<int>(block_size));
+  const int tail = 1 + (m - 1) % static_cast<int>(block_size);
+  MatrixXd last_block = MatrixXd::Zero(static_cast<int>(block_size), m);
+  last_block.topRows(tail) = eigenvectors.bottomRows(tail);
   LanczosSnapshot out = block_lanczos_make_snapshot_from_eigenvalues_last_block(
       eigenvalues, last_block, block_size, nev, beta, which, solver_name);
 
@@ -342,14 +394,8 @@ LanczosSnapshot lanczos_prepare_final_snapshot(const LanczosSnapshot& snapshot,
                                 ": SAI final snapshot has inconsistent dimensions.");
   }
 
-  VectorXd transformed(snapshot.lam.size());
-  for (int j = 0; j < snapshot.lam.size(); ++j) {
-    if (snapshot.lam(j) == 0.0) {
-      throw std::runtime_error(std::string(solver_name) +
-                               ": SAI encountered a zero shift-invert Ritz value.");
-    }
-    transformed(j) = 1.0 / snapshot.lam(j) + shift;
-  }
+  const VectorXd transformed =
+      shift_invert_eigenvalues(snapshot.lam, shift, solver_name);
 
   const std::vector<size_t> indices = sort_indices(transformed, "sr");
   LanczosSnapshot out;
@@ -394,6 +440,19 @@ VectorXd lanczos_absolute_residuals(const LanczosSnapshot& snapshot) {
   return (snapshot.rel_res.array() * (1.0 + snapshot.lam.array().abs())).matrix();
 }
 
+LanczosSnapshot lanczos_progress_snapshot(
+    const LanczosSnapshot& snapshot,
+    const std::string& which,
+    FASTEIG_DOUBLE shift,
+    const char* solver_name) {
+  LanczosSnapshot out;
+  out.lam = (which == "sai")
+                ? shift_invert_eigenvalues(snapshot.lam, shift, solver_name)
+                : snapshot.lam;
+  out.rel_res = snapshot.rel_res;
+  return out;
+}
+
 LanczosSnapshot krylov_schur_progress_snapshot(
     const LanczosSnapshot& snapshot,
     FASTEIG_INT nev,
@@ -403,13 +462,7 @@ LanczosSnapshot krylov_schur_progress_snapshot(
   LanczosSnapshot out = lanczos_snapshot_head(snapshot, nev, solver_name);
   out.rel_res = lanczos_absolute_residuals(out);
   if (which == "sai") {
-    for (int j = 0; j < out.lam.size(); ++j) {
-      if (out.lam(j) == 0.0) {
-        throw std::runtime_error(std::string(solver_name) +
-                                 ": zero shift-invert Ritz value.");
-      }
-      out.lam(j) = shift + 1.0 / out.lam(j);
-    }
+    out.lam = shift_invert_eigenvalues(out.lam, shift, solver_name);
   }
   return out;
 }

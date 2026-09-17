@@ -10,7 +10,10 @@
 #include "fasteig_logger.hpp"
 #include "fasteig_problem.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -35,6 +38,9 @@ FASTEIG_INT LanczosSolver::solve() {
   if (nev <= 0) throw std::invalid_argument("LanczosSolver: nev must be > 0.");
   if (maxiter < nev) throw std::invalid_argument("LanczosSolver: maxiter must be >= nev.");
   if (maxiter > n) throw std::invalid_argument("LanczosSolver: maxiter must be <= n.");
+  if (problem_.is_generalized() && which == "sai") {
+    throw std::invalid_argument("Generalized SAI is currently supported only by KrylovSchur.");
+  }
   core::validate_lanczos_which(which, /*allow_sai=*/true, "LanczosSolver");
 
   // Progress output setup.  A scalar Lanczos "iteration" is one Krylov vector
@@ -49,6 +55,11 @@ FASTEIG_INT LanczosSolver::solve() {
   // operator, vectors, multivectors, and workspace implementations.
   std::shared_ptr<core::Executor> exec = problem_.executor(options_);
   std::unique_ptr<core::LinearOperator> op = problem_.make_linear_operator(options_, *exec);
+  auto original_A = problem_.make_matrix_operator(*exec);
+  auto metric = problem_.make_metric_operator(*exec);
+  auto ritz_vectors = exec->create_multivector(n, nev);
+  auto ritz_residuals = exec->create_multivector(n, nev);
+  auto metric_vectors = exec->create_multivector(n, nev);
   const unsigned int base_seed = options_.seed().value_or(1u);
   auto x = (options_.v0().size() > 0)
                ? exec->create_vector(options_.v0().col(0))
@@ -56,11 +67,18 @@ FASTEIG_INT LanczosSolver::solve() {
   auto av = exec->create_vector(n);
   auto basis = exec->create_multivector(n, maxiter);
   auto lanczos_workspace = core::make_lanczos_workspace(*exec, n, maxiter, nev);
-  core::KrylovSubspace subspace(*op, *x, *av, *basis, base_seed);
+  core::KrylovSubspace subspace(*op, *x, *av, *basis, base_seed, metric.get());
+
+  if (metric) {
+    const char* note = "Projected residual estimates use the B inner product; final residuals use A*x-lambda*B*x.";
+    if (log_logger) log_logger->print_progress_note(note);
+    if (console_logger) console_logger->print_progress_note(note);
+  }
 
   // Scalar Krylov recurrence.  After m iterations, the current Ritz space is
   // span{q_0, ..., q_{m-1}}, and the workspace stores beta_m for residual estimates.
   bool converged = false;
+  bool encountered_breakdown = false;
   FASTEIG_INT it_stop = maxiter;
   FASTEIG_INT last_emitted_iter = 0;
   core::LanczosSnapshot final;
@@ -75,6 +93,9 @@ FASTEIG_INT LanczosSolver::solve() {
     // 3. Orthogonalize z against the active basis and keep the new residual.
     const double alpha = subspace.orthogonalize_operator_result(it + 1);
     const double beta_next = subspace.residual_norm();
+    encountered_breakdown = encountered_breakdown ||
+        beta_next <= 64.0 * std::numeric_limits<double>::epsilon() *
+                         std::max({1.0, std::abs(alpha), std::abs(beta)});
 
     // 4. Record the projected tridiagonal coefficients.
     lanczos_workspace->record_step(it, beta, alpha, beta_next);
@@ -95,11 +116,22 @@ FASTEIG_INT LanczosSolver::solve() {
       last_emitted_iter = m;
     }
 
-    if (do_check && snap.rel_res.size() > 0 && snap.rel_res.maxCoeff() < tol) {
-      converged = true;
-      it_stop = m;
+    // A terminated scalar chain may contain only one vector from a repeated
+    // eigenspace. Allow independent replacement chains to recover multiplicity
+    // instead of accepting exact residuals for the wrong spectral subset.
+    const bool resolve_multiplicity = metric && encountered_breakdown && m < maxiter;
+
+    if (!resolve_multiplicity && do_check && snap.rel_res.size() > 0 && snap.rel_res.maxCoeff() < tol) {
       final = lanczos_workspace->compute_snapshot(m, nev, which,
                                                   /*need_vectors=*/true, "LanczosSolver");
+      if (metric) {
+        resnrms_ = core::evaluate_ritz_pairs(
+            *original_A, metric.get(), *basis, m, final, which, options_.shift(),
+            *ritz_vectors, *ritz_residuals, *metric_vectors, eigvals_);
+        if (!(resnrms_.array() <= tol).all()) continue;
+      }
+      converged = true;
+      it_stop = m;
       if (!do_progress && print_every > 0) {
         core::lanczos_emit_snapshot(final, m, log_logger, console_logger);
       }
@@ -115,14 +147,13 @@ FASTEIG_INT LanczosSolver::solve() {
     }
   }
 
-  // Final Ritz vectors are formed by the workspace so the CPU/CUDA choice stays
-  // hidden from the solver.  CUDA keeps the basis and GEMM on device until the
-  // final eigenvectors are copied back for user-facing results.
-  lanczos_workspace->finalize_eigenpairs(*op, *basis, it_stop, final,
-                                         which, options_.shift(),
-                                         eigvals_, eigvecs_, resnrms_);
-
-  if (which == "sai") compute_final_residual_norms();
+  // Form only the requested Ritz vectors on the executor and check the
+  // original A*x-lambda*B*x residual, rather than the transformed operator.
+  resnrms_ = core::evaluate_ritz_pairs(
+      *original_A, metric.get(), *basis, it_stop, final, which, options_.shift(),
+      *ritz_vectors, *ritz_residuals, *metric_vectors, eigvals_);
+  eigvecs_ = ritz_vectors->copy_to_host();
+  if (metric && !(resnrms_.array() <= tol).all()) status_ = 1;
 
   set_iterations(static_cast<long long>(it_stop));
 

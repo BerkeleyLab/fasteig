@@ -1,7 +1,9 @@
 #include "core/Orthogonalization.hpp"
 
 #include "core/Executor.hpp"
+#include "core/LinearOperator.hpp"
 #include "core/MultiVector.hpp"
+#include "core/Vector.hpp"
 
 #ifdef USE_CUDA
 #include "gpu/CudaCheck.hpp"
@@ -41,6 +43,17 @@ void validate_multivector_qr(const MultiVector& X, const char* where) {
   if (X.rows() < X.cols()) {
     throw std::invalid_argument(std::string(where) + ": row count must be >= column count.");
   }
+}
+
+// Shared triangular normalization for ordinary and B-weighted Cholesky QR.
+FASTEIG_INT cholesky_qr_from_gram(const Eigen::Ref<const MatrixXd>& X,
+                                  const MatrixXd& gram, MatrixXd& Q, MatrixXd& R) {
+  Eigen::LLT<MatrixXd> llt(gram);
+  if (llt.info() != Eigen::Success) return -1;
+  const MatrixXd L = llt.matrixL();
+  R = L.transpose();
+  Q = X * R.triangularView<Eigen::Upper>().solve(MatrixXd::Identity(X.cols(), X.cols()));
+  return 0;
 }
 
 FASTEIG_INT host_thin_qr(const Eigen::Ref<const MatrixXd>& X,
@@ -169,7 +182,8 @@ FASTEIG_INT cuda_householder_qr_in_place(CudaMultiVector& X, MatrixXd& R) {
   return 0;
 }
 
-FASTEIG_INT cuda_cholesky_qr_in_place(CudaMultiVector& X, MatrixXd& R) {
+FASTEIG_INT cuda_cholesky_qr_in_place(CudaMultiVector& X, MatrixXd& R,
+                                            const CudaMultiVector* metric_X = nullptr) {
   validate_multivector_qr(X, "cuda_cholesky_qr_in_place");
 
   const int n = checked_int(X.rows(), "cuda_cholesky_qr_in_place(rows)");
@@ -190,7 +204,7 @@ FASTEIG_INT cuda_cholesky_qr_in_place(CudaMultiVector& X, MatrixXd& R) {
                                    b, b, n,
                                    &one,
                                    X.data(), n,
-                                   X.data(), n,
+                                   (metric_X ? metric_X->data() : X.data()), n,
                                    &zero,
                                    d_gram.ptr, b));
 
@@ -203,7 +217,12 @@ FASTEIG_INT cuda_cholesky_qr_in_place(CudaMultiVector& X, MatrixXd& R) {
                                           CUBLAS_FILL_MODE_UPPER,
                                           b, d_gram.ptr, b,
                                           d_work.ptr, lwork, d_info.ptr));
-  check_cusolver_info(context, d_info.ptr, "cuda_cholesky_qr_in_place(potrf)");
+  int info = 0;
+  FASTEIG_CUDA_CHECK(cudaMemcpyAsync(&info, d_info.ptr, sizeof(int),
+                                     cudaMemcpyDeviceToHost, context.stream()));
+  FASTEIG_CUDA_CHECK(cudaStreamSynchronize(context.stream()));
+  if (info > 0) return -1;  // Rank loss: X is unchanged; caller may recover.
+  if (info < 0) throw std::runtime_error("cuda_cholesky_qr_in_place: invalid potrf argument.");
 
   FASTEIG_CUBLAS_CHECK(cublasDtrsm(context.cublas_handle(),
                                    CUBLAS_SIDE_RIGHT,
@@ -273,17 +292,8 @@ FASTEIG_INT cholesky_qr(const Eigen::Ref<const MatrixXd>& X,
                         MatrixXd& R) {
   validate_tall_skinny(X, "cholesky_qr");
 
-  const int ncols = static_cast<int>(X.cols());
   const MatrixXd gram = X.transpose() * X;
-  Eigen::LLT<MatrixXd> llt(gram);
-  if (llt.info() != Eigen::Success) {
-    return -1;
-  }
-
-  const MatrixXd L = llt.matrixL();
-  R = L.transpose();
-  Q = X * R.triangularView<Eigen::Upper>().solve(MatrixXd::Identity(ncols, ncols));
-  return 0;
+  return cholesky_qr_from_gram(X, gram, Q, R);
 }
 
 FASTEIG_INT cholesky_qr2(const Eigen::Ref<const MatrixXd>& X,
@@ -390,8 +400,44 @@ FASTEIG_INT svqb(MatrixXd& U, double tau, char method) {
   return 0;
 }
 
-FASTEIG_INT thin_qr_in_place(MultiVector& X, MatrixXd& R, QrMethod method) {
+FASTEIG_INT thin_qr_in_place(MultiVector& X, MatrixXd& R, QrMethod method,
+                             const LinearOperator* metric) {
   validate_multivector_qr(X, "thin_qr_in_place");
+
+  if (metric) {
+    if (&metric->executor() != &X.executor() || metric->rows() != X.rows() ||
+        metric->cols() != X.rows()) {
+      throw std::invalid_argument("thin_qr_in_place: metric dimension/executor mismatch.");
+    }
+    if (method == QrMethod::Cholesky2) {
+      MatrixXd R1, R2;
+      if (thin_qr_in_place(X, R1, QrMethod::Cholesky, metric) != 0 ||
+          thin_qr_in_place(X, R2, QrMethod::Cholesky, metric) != 0) return -1;
+      R = R2 * R1;
+      return 0;
+    }
+    if (method != QrMethod::Cholesky) {
+      throw std::invalid_argument("thin_qr_in_place: weighted QR supports Cholesky/Cholesky2.");
+    }
+    auto BX = X.executor().create_multivector(X.rows(), X.cols());
+    metric->apply_block(X, 0, X.cols(), *BX);
+    if (auto* cpu_x = dynamic_cast<CpuMultiVector*>(&X)) {
+      const auto& cpu_bx = dynamic_cast<const CpuMultiVector&>(*BX);
+      MatrixXd gram = cpu_x->values().transpose() * cpu_bx.values();
+      gram = (0.5 * (gram + gram.transpose())).eval();
+      MatrixXd Q;
+      const FASTEIG_INT info = cholesky_qr_from_gram(cpu_x->values(), gram, Q, R);
+      if (info == 0) cpu_x->values() = std::move(Q);
+      return info;
+    }
+#ifdef USE_CUDA
+    if (auto* cuda_x = dynamic_cast<CudaMultiVector*>(&X)) {
+      return cuda_cholesky_qr_in_place(*cuda_x, R,
+                                      &dynamic_cast<const CudaMultiVector&>(*BX));
+    }
+#endif
+    throw std::invalid_argument("thin_qr_in_place: unsupported weighted QR backend.");
+  }
 
   if (auto* cpu_x = dynamic_cast<CpuMultiVector*>(&X)) {
     MatrixXd Q;
@@ -437,7 +483,8 @@ FASTEIG_INT block_gram_schmidt(const MultiVector& basis,
                                FASTEIG_INT active_cols,
                                const MultiVector& source,
                                MultiVector& residual,
-                               MatrixXd& H) {
+                               MatrixXd& H,
+                               const MultiVector* dual_basis) {
   if (&basis.executor() != &source.executor() ||
       &basis.executor() != &residual.executor()) {
     throw std::invalid_argument("block_gram_schmidt: executor mismatch.");
@@ -450,22 +497,30 @@ FASTEIG_INT block_gram_schmidt(const MultiVector& basis,
     throw std::invalid_argument("block_gram_schmidt: dimension mismatch.");
   }
 
+  const MultiVector& dual = dual_basis ? *dual_basis : basis;
+  if (&dual.executor() != &basis.executor() || dual.rows() != basis.rows() ||
+      dual.cols() < active_cols) {
+    throw std::invalid_argument("block_gram_schmidt: dual basis mismatch.");
+  }
+
   H.setZero(static_cast<int>(active_cols), static_cast<int>(source.cols()));
   residual.copy_from(source);
   if (active_cols == 0) return 0;
 
   if (const auto* cpu_basis = dynamic_cast<const CpuMultiVector*>(&basis)) {
+    const auto* cpu_dual = dynamic_cast<const CpuMultiVector*>(&dual);
     const auto* cpu_source = dynamic_cast<const CpuMultiVector*>(&source);
     auto* cpu_residual = dynamic_cast<CpuMultiVector*>(&residual);
-    if (!cpu_source || !cpu_residual) {
+    if (!cpu_dual || !cpu_source || !cpu_residual) {
       throw std::invalid_argument("block_gram_schmidt: CPU object mismatch.");
     }
 
     const auto V = cpu_basis->values().leftCols(static_cast<int>(active_cols));
-    H.noalias() = V.transpose() * cpu_source->values();
+    const auto BV = cpu_dual->values().leftCols(static_cast<int>(active_cols));
+    H.noalias() = BV.transpose() * cpu_source->values();
     cpu_residual->values().noalias() = cpu_source->values() - V * H;
 
-    MatrixXd S = V.transpose() * cpu_residual->values();
+    MatrixXd S = BV.transpose() * cpu_residual->values();
     H.noalias() += S;
     cpu_residual->values().noalias() -= V * S;
     return 0;
@@ -473,9 +528,10 @@ FASTEIG_INT block_gram_schmidt(const MultiVector& basis,
 
 #ifdef USE_CUDA
   if (const auto* cuda_basis = dynamic_cast<const CudaMultiVector*>(&basis)) {
+    const auto* cuda_dual = dynamic_cast<const CudaMultiVector*>(&dual);
     const auto* cuda_source = dynamic_cast<const CudaMultiVector*>(&source);
     auto* cuda_residual = dynamic_cast<CudaMultiVector*>(&residual);
-    if (!cuda_source || !cuda_residual) {
+    if (!cuda_dual || !cuda_source || !cuda_residual) {
       throw std::invalid_argument("block_gram_schmidt: CUDA object mismatch.");
     }
 
@@ -499,7 +555,7 @@ FASTEIG_INT block_gram_schmidt(const MultiVector& basis,
                                      CUBLAS_OP_T, CUBLAS_OP_N,
                                      k, b, n,
                                      &one,
-                                     cuda_basis->data(), n,
+                                     cuda_dual->data(), n,
                                      cuda_source->data(), n,
                                      &zero,
                                      d_h.ptr, k));
@@ -519,7 +575,7 @@ FASTEIG_INT block_gram_schmidt(const MultiVector& basis,
                                      CUBLAS_OP_T, CUBLAS_OP_N,
                                      k, b, n,
                                      &one,
-                                     cuda_basis->data(), n,
+                                     cuda_dual->data(), n,
                                      cuda_residual->data(), n,
                                      &zero,
                                      d_s.ptr, k));
@@ -548,6 +604,114 @@ FASTEIG_INT block_gram_schmidt(const MultiVector& basis,
 #endif
 
   throw std::invalid_argument("block_gram_schmidt: unsupported multivector backend.");
+}
+
+bool complete_block_qr(const MultiVector& basis, FASTEIG_INT active_cols,
+                       const MultiVector& source, MultiVector& Q, MatrixXd& R,
+                       const LinearOperator* metric, const MultiVector* dual_basis,
+                       unsigned int seed, double reference_norm) {
+  validate_multivector_qr(source, "complete_block_qr");
+  const Executor& exec = source.executor();
+  const FASTEIG_INT b = source.cols();
+  if (&basis.executor() != &exec || &Q.executor() != &exec ||
+      basis.rows() != source.rows() || Q.rows() != source.rows() || Q.cols() != b ||
+      active_cols < 0 || active_cols > basis.cols() || active_cols > basis.rows() ||
+      !std::isfinite(reference_norm) || reference_norm < 0.0 ||
+      (metric && (!dual_basis || &metric->executor() != &exec ||
+                   metric->rows() != source.rows() || metric->cols() != source.rows())) ||
+      (dual_basis && (&dual_basis->executor() != &exec ||
+                      dual_basis->rows() != basis.rows() || dual_basis->cols() < active_cols))) {
+    throw std::invalid_argument("complete_block_qr: invalid dimensions, metric or executor.");
+  }
+  auto BQ = metric ? exec.create_multivector(Q.rows(), b) : nullptr;
+  const MultiVector& dual = dual_basis ? *dual_basis : basis;
+  const FASTEIG_INT capacity = std::min(b, basis.rows() - active_cols);
+  const double threshold = 64.0 * std::numeric_limits<double>::epsilon() * reference_norm;
+
+  // Cholesky QR is the normal path. Check the small Gram matrices before
+  // accepting it: nearly dependent columns can yield a successful but inaccurate
+  // Cholesky factorization. No large block is downloaded for these checks.
+  Q.copy_from(source);
+  if (capacity == b && thin_qr_in_place(Q, R, QrMethod::Cholesky, metric) == 0) {
+    if (metric) metric->apply_block(Q, 0, b, *BQ);
+    const MatrixXd gram = Q.transpose_multiply(b, BQ ? *BQ : Q, b);
+    const MatrixXd cross = dual.transpose_multiply(active_cols, Q, b);
+    if (R.allFinite() && R.diagonal().cwiseAbs().minCoeff() > threshold &&
+        gram.allFinite() && cross.allFinite() &&
+        (gram - MatrixXd::Identity(b, b)).norm() < 1e-10 && cross.norm() < 1e-10) return false;
+  }
+
+  // Recover from rank loss with two-pass projection, filling only missing
+  // directions. At full dimension the trailing block is zero and never enters
+  // the Ritz basis. R is recomputed from the unmodified source below.
+  bool replenished = false;
+  Q.set_zero();
+  if (BQ) BQ->set_zero();
+  auto v = exec.create_vector(Q.rows());
+  auto work = exec.create_vector(Q.rows());
+  auto Bv = metric ? exec.create_vector(Q.rows()) : nullptr;
+  auto norm = [&]() {
+    if (!metric) return v->norm2();
+    metric->apply(*v, *Bv);
+    const double squared = v->dot(*Bv);
+    if (!std::isfinite(squared) || squared < 0.0) {
+      throw std::runtime_error("complete_block_qr: B must be positive definite.");
+    }
+    return std::sqrt(squared);
+  };
+  auto project = [&](FASTEIG_INT j) {
+    basis.orthogonalize_active_columns(active_cols, *v, *work, dual_basis);
+    Q.orthogonalize_active_columns(j, *work, *v, BQ.get());
+  };
+  auto best = exec.create_vector(Q.rows());
+  for (FASTEIG_INT j = 0; j < capacity; ++j) {
+    // Pivot across all source columns before adding any random direction.
+    // This retains the residual range even for a partial last block.
+    double length = 0.0;
+    double original_scale = 0.0;
+    for (FASTEIG_INT col = 0; col < b; ++col) {
+      source.copy_column_to(col, *v);
+      original_scale = std::max(original_scale, norm());
+      project(j);
+      const double candidate_norm = norm();
+      if (candidate_norm > length) {
+        length = candidate_norm;
+        best->copy_from(*v);
+      }
+    }
+    const double cutoff = std::max(threshold, 1e-12 * original_scale);
+    if (length > cutoff) {
+      v->copy_from(*best);
+      length = norm();  // Refresh Bv for the chosen column.
+    }
+    if (!(length > cutoff)) {
+      replenished = true;
+      length = 0.0;
+      for (unsigned int attempt = 0; attempt < 4; ++attempt) {
+        auto random = exec.create_random_vector(Q.rows(), seed + 17u * (j + 1) + attempt);
+        v->copy_from(*random);
+        const double random_norm = norm();
+        project(j);
+        length = norm();
+        if (length > 1e-12 * random_norm) break;
+        length = 0.0;
+      }
+      if (length == 0.0) throw std::runtime_error("complete_block_qr: unable to complete the basis.");
+    }
+    v->scale(1.0 / length);
+    Q.copy_column_from(j, *v);
+    if (BQ) {
+      Bv->scale(1.0 / length);
+      BQ->copy_column_from(j, *Bv);
+    }
+  }
+  R = (BQ ? *BQ : Q).transpose_multiply(b, source, b);
+  // Roundoff-sized couplings of replacement directions must not become a
+  // fictitious Krylov connection (e.g. when A is a scalar multiple of B).
+  for (int j = 0; j < R.cols(); ++j) {
+    if (R.col(j).norm() <= threshold) R.col(j).setZero();
+  }
+  return replenished;
 }
 
 std::unique_ptr<MultiVector> orthonormalize_block(

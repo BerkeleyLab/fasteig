@@ -7,10 +7,40 @@ CPU/GPU executable behavior:
 - Run `./runfasteig_cpu inputfile` to select the CPU executor.
 - Run `./runfasteig_gpu inputfile` to select the CUDA executor.
 - These CUDA paths currently support stored MatrixMarket/CSR standard
-  eigenproblems. Generalized Krylov--Schur and matrix-free problems should use
-  `runfasteig_cpu` for now. CUDA `which SAI` is supported by scalar Lanczos and
-  Krylov--Schur when NVIDIA cuDSS is available; the block methods, Davidson, Chebyshev, and LOBPCG
-  do not support `SAI`.
+  eigenproblems. Lanczos, BlockLanczos, KrylovSchur and BlockKrylovSchur also
+  support generalized problems on CPU/CUDA with symmetric A and SPD B for
+  SR/LR/SM/LM/BE. Generalized SAI is available only in KrylovSchur. Matrix-free problems
+  should use `runfasteig_cpu` for now. `which SAI` is supported by Lanczos, BlockLanczos,
+  KrylovSchur, and BlockKrylovSchur on standard problems. CUDA SAI requires
+  NVIDIA cuDSS; Davidson, Chebyshev, and LOBPCG do not support `SAI`.
+For a generalized problem, add `bmatrix path/to/B.mtx` to the same CPU/GPU
+input deck and choose one of the four Krylov solvers with SR/LR/SM/LM/BE.
+B is factored once and reused. CUDA generalized runs require cuDSS for every
+selection. Block Lanczos uses `blksize` and counts block expansions in `maxiter`;
+Block Krylov-Schur also uses `blksize` independently of `nev`, but counts
+restart cycles. Use enough `maxdim` for ceil(nev/blksize) retained blocks and
+at least one expansion block; extra space preserves additional Ritz vectors.
+Both use B-weighted Cholesky QR. Final residuals are checked against A and B.
+For block shift-invert, set `which SAI` and `shift 2` to find eigenvalues
+nearest 2. Use `solver BlockLanczos` with `blksize 5`, or
+`solver BlockKrylovSchur` with `nev 5`, `blksize 5`, and `maxdim 40`.
+A cycle with only two blocks can require many restarts.
+Both reuse the existing factorization for block solves. SAI progress shows
+backtransformed eigenvalues with inverse-operator relative residual estimates;
+final residuals use the original A. For generalized SAI use KrylovSchur only:
+  amatrix Sparse_Matrices/shallow_water1.mtx
+  bmatrix Sparse_Matrices/shallow_water2.mtx
+  solver KrylovSchur
+  which SAI
+  shift 0.1
+  nev 5
+  maxiter 200
+  maxdim 30
+  tol 1e-10
+Choose a shift for which A-shift*B is nonsingular. Generalized KrylovSchur factors
+B once for SR/LR/SM/LM/BE, or A-shift*B once for SAI. CUDA requires cuDSS in both
+cases. B must be positive definite; no separate B factorization is done for SAI.
+Final residuals are ||A*x-lambda*B*x|| / ((1+|lambda|)*||B*x||).
 Chebyshev uses `which SR` or `which LR` on both CPU and CUDA. Its filter,
 orthogonalization, and large Ritz/residual blocks stay in executor memory;
 the small projected eigensolve runs on the host through the shared core code.

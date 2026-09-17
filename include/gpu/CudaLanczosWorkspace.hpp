@@ -48,7 +48,8 @@ public:
                                          FASTEIG_INT nev,
                                          const std::string& which,
                                          bool need_vectors,
-                                         const char* solver_name) override;
+                                         const char* solver_name,
+                                         FASTEIG_INT active_dim = 0) override;
 
   void prepare_krylov_schur_restart(
       FASTEIG_INT retained_cols,

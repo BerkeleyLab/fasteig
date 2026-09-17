@@ -93,10 +93,11 @@ void orthogonalize_active_columns(const MultiVector& X,
 double orthogonalize_active_columns(const MultiVector& X,
                                     FASTEIG_INT active_cols,
                                     const Vector& source,
-                                    Vector& residual) {
+                                    Vector& residual,
+                                    const MultiVector* dual_basis) {
   require_same_executor(X.executor(), source.executor(), "core::orthogonalize_active_columns(X,source)");
   require_same_executor(X.executor(), residual.executor(), "core::orthogonalize_active_columns(X,residual)");
-  return X.orthogonalize_active_columns(active_cols, source, residual);
+  return X.orthogonalize_active_columns(active_cols, source, residual, dual_basis);
 }
 
 void apply(const LinearOperator& op, const Vector& x, Vector& y, double alpha, double beta) {

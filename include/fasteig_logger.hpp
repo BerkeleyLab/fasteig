@@ -62,6 +62,14 @@ public:
 
   void print_matrix_summary(const fasteig_problem& problem);
 
+  void print_factorization_setup(const std::string& backend,
+                                 const std::string& matrix,
+                                 std::optional<double> shift,
+                                 double analysis_sec,
+                                 double factorization_sec,
+                                 double setup_sec,
+                                 std::optional<double> matrix_setup_sec = std::nullopt);
+
   void print_final_results(FASTEIG_INT status,
                            const VectorXd& eigvals,
                            const VectorXd& residual_norms,

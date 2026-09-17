@@ -21,8 +21,10 @@ KrylovSubspace::KrylovSubspace(const LinearOperator& op,
                                Vector& residual,
                                Vector& operator_result,
                                MultiVector& basis,
-                               unsigned int restart_seed)
+                               unsigned int restart_seed,
+                               const LinearOperator* metric)
     : op_(op),
+      metric_(metric),
       residual_(residual),
       operator_result_(operator_result),
       basis_(basis),
@@ -40,7 +42,17 @@ KrylovSubspace::KrylovSubspace(const LinearOperator& op,
   if (basis_.rows() != residual_.size()) {
     throw std::invalid_argument("core::KrylovSubspace: basis row count mismatch.");
   }
+  if (metric_) {
+    if (&metric_->executor() != &op_.executor() || metric_->rows() != residual_.size() ||
+        metric_->cols() != residual_.size()) {
+      throw std::invalid_argument("core::KrylovSubspace: metric dimension/executor mismatch.");
+    }
+    metric_basis_ = basis_.executor().create_multivector(basis_.rows(), basis_.cols());
+    metric_residual_ = residual_.executor().create_vector(residual_.size());
+  }
 }
+
+KrylovSubspace::~KrylovSubspace() = default;
 
 KrylovSubspace::KrylovSubspace(const LinearOperator& op,
                                Vector& residual,
@@ -125,7 +137,14 @@ double KrylovSubspace::normalize_residual_into_basis(FASTEIG_INT basis_col) {
   const double beta = normalize_or_restart(basis_col);
   scal(1.0 / beta, residual_);
   copy_column_from(basis_, basis_col, residual_);
-  return beta;
+  if (metric_) {
+    // normalize_or_restart refreshed B*f; scale it with f and cache B*q.
+    scal(1.0 / beta, *metric_residual_);
+    copy_column_from(*metric_basis_, basis_col, *metric_residual_);
+  }
+  // An invariant subspace has zero coupling to a replacement random vector.
+  // Its normalization factor must not be recorded as a Lanczos off-diagonal.
+  return restarted_column_ ? 0.0 : beta;
 }
 
 void KrylovSubspace::apply_operator_to_basis_column(FASTEIG_INT basis_col) {
@@ -137,11 +156,21 @@ void KrylovSubspace::apply_operator_to_basis_column(FASTEIG_INT basis_col) {
 
 double KrylovSubspace::orthogonalize_operator_result(FASTEIG_INT active_cols) {
   return fasteig::core::orthogonalize_active_columns(
-      basis_, active_cols, operator_result_, residual_);
+      basis_, active_cols, operator_result_, residual_, metric_basis_.get());
 }
 
 double KrylovSubspace::residual_norm() const {
-  const double beta_next = norm2(residual_);
+  double beta_next = 0.0;
+  if (metric_) {
+    apply(*metric_, residual_, *metric_residual_);
+    const double squared = dot(residual_, *metric_residual_);
+    if (!std::isfinite(squared) || squared < 0.0) {
+      throw std::runtime_error("core::KrylovSubspace: B must be positive definite (invalid B-norm).");
+    }
+    beta_next = std::sqrt(squared);
+  } else {
+    beta_next = norm2(residual_);
+  }
   if (!std::isfinite(beta_next)) {
     throw std::runtime_error("core::KrylovSubspace: non-finite next residual norm encountered.");
   }
@@ -163,6 +192,10 @@ void KrylovSubspace::rotate_basis(
   auto rotated = basis_.executor().create_multivector(basis_.rows(), retained_cols);
   basis_.right_multiply_active_columns(active_cols, coefficients, *rotated);
   basis_.copy_columns_from(0, *rotated, 0, retained_cols);
+  if (metric_basis_) {
+    metric_basis_->right_multiply_active_columns(active_cols, coefficients, *rotated);
+    metric_basis_->copy_columns_from(0, *rotated, 0, retained_cols);
+  }
 }
 
 void KrylovSubspace::record_step(FASTEIG_INT it,
@@ -197,7 +230,8 @@ void KrylovSubspace::record_step(FASTEIG_INT it,
 }
 
 double KrylovSubspace::normalize_or_restart(FASTEIG_INT it) {
-  double beta = norm2(residual_);
+  restarted_column_ = false;
+  double beta = residual_norm();
   if (!std::isfinite(beta)) {
     throw std::runtime_error("core::KrylovSubspace: non-finite residual norm encountered.");
   }
@@ -206,7 +240,8 @@ double KrylovSubspace::normalize_or_restart(FASTEIG_INT it) {
   }
 
   restart_residual(it);
-  beta = norm2(residual_);
+  restarted_column_ = true;
+  beta = residual_norm();
   if (beta <= std::numeric_limits<double>::epsilon()) {
     throw std::runtime_error("core::KrylovSubspace: breakdown, unable to generate new basis vector.");
   }
@@ -217,18 +252,20 @@ void KrylovSubspace::restart_residual(FASTEIG_INT it) {
   auto candidate =
       residual_.executor().create_random_vector(residual_.size(),
                                                 restart_seed_ + static_cast<unsigned int>(it + 1));
-  copy(*candidate, residual_);
-
-  for (FASTEIG_INT j = 0; j < it; ++j) {
-    const double h = column_dot(basis_, j, residual_);
-    column_axpy(-h, basis_, j, residual_);
-  }
+  // Two-pass projection also handles random replacement after breakdown.
+  // With a metric, coefficients use (B*Q)^T while subtraction uses Q.
+  fasteig::core::orthogonalize_active_columns(
+      basis_, it, *candidate, residual_, metric_basis_.get());
 }
 
 BlockKrylovSubspace::BlockKrylovSubspace(const LinearOperator& op,
                                          const MultiVector& initial_block,
-                                         MultiVector& basis)
+                                         MultiVector& basis,
+                                         const LinearOperator* metric,
+                                         unsigned int restart_seed)
     : op_(op),
+      metric_(metric),
+      restart_seed_(restart_seed),
       initial_block_(initial_block),
       basis_(basis) {
   if (&op_.executor() != &basis_.executor() ||
@@ -241,6 +278,15 @@ BlockKrylovSubspace::BlockKrylovSubspace(const LinearOperator& op,
   if (initial_block.cols() <= 0) {
     throw std::invalid_argument("core::BlockKrylovSubspace: block size must be positive.");
   }
+  if (metric_) {
+    if (&metric_->executor() != &basis_.executor() || metric_->rows() != basis_.rows() ||
+        metric_->cols() != basis_.rows()) {
+      throw std::invalid_argument("core::BlockKrylovSubspace: metric dimension/executor mismatch.");
+    }
+    metric_basis_ = basis_.executor().create_multivector(basis_.rows(), basis_.cols());
+    metric_block_ = basis_.executor().create_multivector(basis_.rows(), initial_block_.cols());
+  }
+  qr_block_ = basis_.executor().create_multivector(basis_.rows(), initial_block_.cols());
   operator_block_ = op_.executor().create_multivector(op_.rows(), initial_block_.cols());
   residual_block_ = op_.executor().create_multivector(op_.rows(), initial_block_.cols());
 }
@@ -254,12 +300,9 @@ void BlockKrylovSubspace::initialize_basis_block() {
     throw std::invalid_argument("core::BlockKrylovSubspace::initialize_basis_block: initial block mismatch.");
   }
 
-  residual_block_->copy_from(initial_block_);
   MatrixXd R;
-  const FASTEIG_INT info = thin_qr_in_place(*residual_block_, R, QrMethod::Cholesky);
-  if (info != 0) {
-    throw std::runtime_error("core::BlockKrylovSubspace::initialize_basis_block: initial QR failed.");
-  }
+  complete_block_qr(basis_, 0, initial_block_, *residual_block_, R,
+                    metric_, metric_basis_.get(), restart_seed_, 0.0);
   copy_block_to_basis(0, *residual_block_);
   initialized_ = true;
 }
@@ -277,17 +320,19 @@ void BlockKrylovSubspace::apply_operator_to_basis_block(FASTEIG_INT block_index)
 
 void BlockKrylovSubspace::orthogonalize_operator_block(FASTEIG_INT active_cols) {
   const FASTEIG_INT b = initial_block_.cols();
-  if (active_cols <= 0 || active_cols > basis_.cols() || active_cols % b != 0) {
+  if (active_cols <= 0 || active_cols > basis_.cols() || (active_cols % b != 0 && active_cols != basis_.rows())) {
     throw std::invalid_argument("core::BlockKrylovSubspace::orthogonalize_operator_block: invalid active column count.");
   }
 
   MatrixXd H;
   const FASTEIG_INT info = block_gram_schmidt(basis_, active_cols, *operator_block_,
-                                              *residual_block_, H);
+                                              *residual_block_, H, metric_basis_.get());
   if (info != 0) {
     throw std::runtime_error("core::BlockKrylovSubspace::orthogonalize_operator_block: block Gram-Schmidt failed.");
   }
-  diagonal_block_ = H.bottomRows(static_cast<int>(b));
+  const FASTEIG_INT width = 1 + (active_cols - 1) % b;
+  diagonal_block_.setZero(b, b);
+  diagonal_block_.topLeftCorner(width, width) = H.bottomRows(width).leftCols(width);
 }
 
 void BlockKrylovSubspace::qr_residual_block(FASTEIG_INT next_block_index) {
@@ -296,10 +341,22 @@ void BlockKrylovSubspace::qr_residual_block(FASTEIG_INT next_block_index) {
     throw std::invalid_argument("core::BlockKrylovSubspace::qr_residual_block: block out of range.");
   }
 
-  FASTEIG_INT info = thin_qr_in_place(*residual_block_, coupling_block_, QrMethod::Cholesky);
-  if (info != 0) {
-    throw std::runtime_error("core::BlockKrylovSubspace::qr_residual_block: block QR failed.");
+  double scale = 0.0;
+  if (metric_) {
+    metric_->apply_block(*operator_block_, 0, b, *metric_block_);
+    const MatrixXd gram = operator_block_->transpose_multiply(b, *metric_block_, b);
+    scale = std::sqrt(std::max(0.0, gram.trace()));
+  } else {
+    scale = operator_block_->column_norms().norm();
   }
+  // Reuse the rank-aware QR for either inner product. This also handles a
+  // partial final block or an invariant subspace without normalizing roundoff.
+  const bool replenished = complete_block_qr(
+      basis_, std::min(next_block_index * b, basis_.rows()), *residual_block_, *qr_block_,
+      coupling_block_, metric_, metric_basis_.get(),
+      restart_seed_ + static_cast<unsigned int>(next_block_index * b), scale);
+  replenished_directions_ = replenished_directions_ || replenished;
+  residual_block_->copy_from(*qr_block_);
   copy_block_to_basis(next_block_index * b, *residual_block_);
 }
 
@@ -308,13 +365,15 @@ void BlockKrylovSubspace::restart_with_ritz_block(
     const Eigen::Ref<const MatrixXd>& coefficients,
     FASTEIG_INT residual_block_index) {
   const FASTEIG_INT b = initial_block_.cols();
+  const FASTEIG_INT retained = coefficients.cols();
   if (!initialized_) {
     throw std::logic_error(
         "core::BlockKrylovSubspace::restart_with_ritz_block: basis not initialized.");
   }
   if (active_cols <= 0 || active_cols > basis_.cols() ||
       coefficients.rows() != static_cast<int>(active_cols) ||
-      coefficients.cols() != static_cast<int>(b)) {
+      retained <= 0 || retained % b != 0 || retained >= active_cols ||
+      retained + b > basis_.cols()) {
     throw std::invalid_argument(
         "core::BlockKrylovSubspace::restart_with_ritz_block: coefficient mismatch.");
   }
@@ -324,8 +383,8 @@ void BlockKrylovSubspace::restart_with_ritz_block(
         "core::BlockKrylovSubspace::restart_with_ritz_block: residual block out of range.");
   }
 
-  if (!restart_ritz_block_) {
-    restart_ritz_block_ = basis_.executor().create_multivector(basis_.rows(), b);
+  if (!restart_ritz_block_ || restart_ritz_block_->cols() != retained) {
+    restart_ritz_block_ = basis_.executor().create_multivector(basis_.rows(), retained);
     restart_residual_block_ = basis_.executor().create_multivector(basis_.rows(), b);
   }
 
@@ -335,9 +394,25 @@ void BlockKrylovSubspace::restart_with_ritz_block(
   restart_residual_block_->copy_columns_from(
       0, basis_, residual_block_index * b, b);
 
+  if (metric_) {
+    if (!restart_metric_ritz_block_ || restart_metric_ritz_block_->cols() != retained) {
+      restart_metric_ritz_block_ = basis_.executor().create_multivector(basis_.rows(), retained);
+      restart_metric_residual_block_ = basis_.executor().create_multivector(basis_.rows(), b);
+    }
+    metric_basis_->right_multiply_active_columns(active_cols, coefficients,
+                                                 *restart_metric_ritz_block_);
+    restart_metric_residual_block_->copy_columns_from(
+        0, *metric_basis_, residual_block_index * b, b);
+  }
   basis_.set_zero();
-  copy_block_to_basis(0, *restart_ritz_block_);
-  copy_block_to_basis(b, *restart_residual_block_);
+  basis_.copy_columns_from(0, *restart_ritz_block_, 0, retained);
+  basis_.copy_columns_from(retained, *restart_residual_block_, 0, b);
+  if (metric_) {
+    // Rotate Q and BQ together; preserve the trailing metric residual block.
+    metric_basis_->set_zero();
+    metric_basis_->copy_columns_from(0, *restart_metric_ritz_block_, 0, retained);
+    metric_basis_->copy_columns_from(retained, *restart_metric_residual_block_, 0, b);
+  }
 }
 
 void BlockKrylovSubspace::copy_block_to_basis(FASTEIG_INT first_col,
@@ -351,6 +426,10 @@ void BlockKrylovSubspace::copy_block_to_basis(FASTEIG_INT first_col,
   }
 
   basis_.copy_columns_from(first_col, block, 0, block.cols());
+  if (metric_) {
+    metric_->apply_block(block, 0, block.cols(), *metric_block_);
+    metric_basis_->copy_columns_from(first_col, *metric_block_, 0, block.cols());
+  }
 }
 
 }  // namespace core

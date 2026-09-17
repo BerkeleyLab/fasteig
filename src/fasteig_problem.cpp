@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -30,6 +31,34 @@ fasteig::core::CsrMatrixData make_core_csr_data(const fasteig_problem::CsrMatrix
   out.colind = src.colind;
   out.values = src.values;
   return out;
+}
+
+SpMat sparse_from_csr(const fasteig_problem::CsrMatrixData& data, FASTEIG_INT n) {
+  using RowSparse = Eigen::SparseMatrix<double, Eigen::RowMajor>;
+  return Eigen::Map<const RowSparse>(n, n, static_cast<int>(data.values.size()),
+                                     data.rowptr.data(), data.colind.data(), data.values.data());
+}
+
+bool is_krylov_solver(const std::string& name) {
+  return name.rfind("Lanczos", 0) == 0 || name.rfind("BlockLanczos", 0) == 0 ||
+         name.rfind("KrylovSchur", 0) == 0 || name.rfind("BlockKrylovSchur", 0) == 0;
+}
+
+void validate_generalized_solver(const std::string& name, bool use_sai) {
+  if (!is_krylov_solver(name)) {
+    throw std::invalid_argument("Generalized problems require Lanczos, BlockLanczos, KrylovSchur or BlockKrylovSchur.");
+  }
+  if (use_sai && name.rfind("KrylovSchur", 0) != 0) {
+    throw std::invalid_argument("Generalized SAI is currently supported only by KrylovSchur.");
+  }
+}
+
+void require_symmetric(const SpMat& matrix, const char* name) {
+  const SpMat difference = matrix - SpMat(matrix.transpose());
+  if (!std::isfinite(matrix.norm()) ||
+      difference.norm() > 1e-12 * std::max(1.0, matrix.norm())) {
+    throw std::invalid_argument(std::string("Generalized Krylov solvers require symmetric ") + name + ".");
+  }
 }
 
 }  // namespace
@@ -86,6 +115,9 @@ fasteig_problem::fasteig_problem(const fasteig_params& p)
     }
 
     build_default_ops_from_B(opsB_);
+    csrB_ = build_csr_from_sparse_matrix(*B_,
+        p.matrixformat == MatrixFormat::MTX && p.b_mtx_symmetric,
+        p.matrixformat == MatrixFormat::MTX && p.b_mtx_skew_symmetric);
     // Defer factorization of B to prepare(opts) so we can time/diagnose it and guarantee it's done once.
   }
 }
@@ -95,154 +127,86 @@ fasteig_problem::fasteig_problem(const fasteig_params& p)
 // ------------------------
 
 void fasteig_problem::prepare(const fasteig_options& opts) {
-  const std::string solver_name = opts.solver().empty() ? solver_ : opts.solver();
-
-  auto print_line = [&](const std::string& s) {
-    logger_.line(s);
-    if (opts.verbosity() >= 1) std::cout << s << "\n";
-  };
-
-  auto print_kv = [&](const char* key, const std::string& value) {
-    constexpr int kKeyWidth = 22;
-    std::ostringstream ss;
-    ss << "  " << std::left << std::setw(kKeyWidth) << key << ": " << value;
-    print_line(ss.str());
-  };
-
-  auto factorization_backend = [] {
-#ifdef EIGEN_USE_MKL_ALL
-    return std::string("MKL PardisoLDLT");
-#else
-    return std::string("Eigen SimplicialLDLT");
-#endif
-  };
-
   const bool use_sai = is_sai_which(opts.which());
+  if (!use_sai && !B_) return;
+  if (use_sai && !std::isfinite(opts.shift())) {
+    throw std::invalid_argument("prepare(): shift must be finite.");
+  }
+  if (!H_ || !csrA_) throw std::invalid_argument("prepare(): factorization requires a stored matrix.");
+  if (B_) {
+    const std::string solver_name = opts.solver().empty() ? solver_ : opts.solver();
+    validate_generalized_solver(solver_name.empty() ? "Lanczos" : solver_name, use_sai);
+    require_symmetric(sparse_from_csr(*csrA_, n_), "A");
+    require_symmetric(sparse_from_csr(*csrB_, n_), "B");
+  }
+  // The CUDA inverse operator owns its cuDSS factors. Do not also factor on CPU.
+  if (executor(opts)->is_gpu()) return;
+  if (use_sai ? (sai_factorized_ && sai_shift_ == opts.shift()) : b_factorized_) return;
+  // A failed refactorization must not leave a previous shift marked reusable.
+  if (use_sai) sai_factorized_ = false;
+  else b_factorized_ = false;
+
+  const auto setup_t0 = std::chrono::steady_clock::now();
+  SpMat factor_matrix = sparse_from_csr(use_sai ? *csrA_ : *csrB_, n_);
+  if (use_sai && B_) {
+    // Sparse subtraction forms the union of both patterns, including diagonals
+    // present only in B. The input MatrixMarket triangles have been expanded.
+    factor_matrix -= opts.shift() * sparse_from_csr(*csrB_, n_);
+  } else if (use_sai && opts.shift() != 0.0) {
+    for (FASTEIG_INT i = 0; i < n_; ++i) factor_matrix.coeffRef(i, i) -= opts.shift();
+  }
+  factor_matrix.makeCompressed();
+  auto& factor = use_sai ? ldlt_ : ldltB_;
+  const auto analysis_t0 = std::chrono::steady_clock::now();
+  factor.analyzePattern(factor_matrix);
+  if (factor.info() != Eigen::Success) {
+    throw std::runtime_error("prepare(): sparse factorization analysis failed.");
+  }
+  const auto analysis_t1 = std::chrono::steady_clock::now();
+  factor.factorize(factor_matrix);
+  const auto factor_t1 = std::chrono::steady_clock::now();
+  if (factor.info() != Eigen::Success) {
+    throw std::runtime_error("prepare(): factorization failed; check B or whether the shift is an eigenvalue.");
+  }
+#ifndef EIGEN_USE_MKL_ALL
+  if (!factor.vectorD().allFinite()) {
+    throw std::runtime_error("prepare(): factorization produced non-finite pivots.");
+  }
+  if (!use_sai && (factor.vectorD().array() <= 0.0).any()) {
+    throw std::invalid_argument("prepare(): generalized Krylov solvers require positive-definite B.");
+  }
+#endif
+  const double analysis_sec = std::chrono::duration<double>(analysis_t1 - analysis_t0).count();
+  const double factor_sec = std::chrono::duration<double>(factor_t1 - analysis_t1).count();
+  const double setup_sec = std::chrono::duration<double>(factor_t1 - setup_t0).count();
   if (use_sai) {
-    if (B_) {
-      throw std::invalid_argument("prepare(): generalized eigenproblems do not support which=SAI.");
-    }
-    if (opts.gpu_backend()) {
-      // CUDA SAI setup is owned by the CUDA shift-invert LinearOperator, not
-      // by the CPU operations path below.
-      return;
-    }
-    if (!H_) {
-      throw std::invalid_argument("prepare(): SAI requires a stored matrix.");
-    }
-
-    if (!sai_factorized_ || sai_shift_ != opts.shift()) {
-      sai_factorized_ = false;
-      sai_analysis_sec_.reset();
-      sai_factorization_sec_.reset();
-      sai_setup_sec_.reset();
-
-      print_line("");
-      print_line("SAI SETUP");
-      print_line("=========");
-      print_line("");
-      print_kv("Factorization Backend", factorization_backend());
-      {
-        std::ostringstream ss;
-        ss << std::setprecision(16) << opts.shift();
-        print_kv("Shift", ss.str());
-      }
-      print_line("  Performing shift-invert factorization (LDLT)...");
-
-      const auto setup_t0 = std::chrono::steady_clock::now();
-      SpMat shifted = *H_;
-      if (opts.shift() != 0.0) {
-        shifted.diagonal().array() -= opts.shift();
-      }
-      shifted.makeCompressed();
-
-      const auto analysis_t0 = std::chrono::steady_clock::now();
-      ldlt_.analyzePattern(shifted);
-      const auto analysis_t1 = std::chrono::steady_clock::now();
-
-      const auto factor_t0 = std::chrono::steady_clock::now();
-      ldlt_.factorize(shifted);
-      const auto factor_t1 = std::chrono::steady_clock::now();
-      const auto setup_t1 = factor_t1;
-
-      if (ldlt_.info() != Eigen::Success) {
-        throw std::runtime_error("prepare(): SAI factorization failed (LDLT info != Success).");
-      }
-
-      opsSAI_.matvec = [this](const VectorXd& v, VectorXd& av) {
-        av = ldlt_.solve(v);
-      };
-      opsSAI_.block_matvec = [this](const MatrixXd& V, MatrixXd& AV) {
-        AV = ldlt_.solve(V);
-      };
-
-      sai_factorized_ = true;
-      sai_shift_ = opts.shift();
-      sai_analysis_sec_ = std::chrono::duration<double>(analysis_t1 - analysis_t0).count();
-      sai_factorization_sec_ = std::chrono::duration<double>(factor_t1 - factor_t0).count();
-      sai_setup_sec_ = std::chrono::duration<double>(setup_t1 - setup_t0).count();
-
-      {
-        std::ostringstream ss;
-        ss << std::fixed << std::setprecision(6) << *sai_analysis_sec_;
-        print_kv("Analyze Pattern (sec)", ss.str());
-      }
-      {
-        std::ostringstream ss;
-        ss << std::fixed << std::setprecision(6) << *sai_factorization_sec_;
-        print_kv("Factorization (sec)", ss.str());
-      }
-      {
-        std::ostringstream ss;
-        ss << std::fixed << std::setprecision(6) << *sai_setup_sec_;
-        print_kv("SAI Setup Total (sec)", ss.str());
-      }
-      print_line("");
-    }
+    opsSAI_.matvec = [this](const VectorXd& v, VectorXd& y) { y = ldlt_.solve(v); };
+    opsSAI_.block_matvec = [this](const MatrixXd& v, MatrixXd& y) { y = ldlt_.solve(v); };
+    sai_factorized_ = true;
+    sai_shift_ = opts.shift();
+    sai_analysis_sec_ = analysis_sec;
+    sai_factorization_sec_ = factor_sec;
+    sai_setup_sec_ = setup_sec;
+  } else {
+    opsB_.solve = [this](const VectorXd& v, VectorXd& y) { y = ldltB_.solve(v); };
+    opsB_.block_solve = [this](const MatrixXd& v, MatrixXd& y) { y = ldltB_.solve(v); };
+    opsInverseB_.matvec = opsB_.solve;
+    opsInverseB_.block_matvec = opsB_.block_solve;
+    b_factorized_ = true;
+    b_factorization_sec_ = factor_sec;
   }
-
-  if (!B_) return;
-  if (opts.gpu_backend()) {
-    throw std::invalid_argument(
-        "prepare(): generalized eigenproblems are currently host-only.");
+#ifdef EIGEN_USE_MKL_ALL
+  const std::string backend = "MKL PardisoLDLT";
+#else
+  const std::string backend = "Eigen SimplicialLDLT";
+#endif
+  const auto shift = use_sai ? std::optional<double>(opts.shift()) : std::nullopt;
+  const std::string matrix = use_sai ? (B_ ? "A - shift*B" : "A - shift*I") : "B";
+  logger_.print_factorization_setup(backend, matrix, shift, analysis_sec, factor_sec, setup_sec);
+  if (opts.verbosity() >= 1) {
+    fasteig_logger console(&std::cout);
+    console.print_factorization_setup(backend, matrix, shift, analysis_sec, factor_sec, setup_sec);
   }
-  if (b_factorized_) return;
-
-  if (solver_name.rfind("KrylovSchur", 0) != 0) {
-    // Currently, generalized eigenproblems are only supported by KrylovSchur.
-    return;
-  }
-
-  print_line("");
-  print_line("GENERALIZED SETUP");
-  print_line("=================");
-  print_line("");
-  print_kv("Factorization Backend", factorization_backend());
-  print_line("  Performing B factorization (LDLT)...");
-
-  const auto t0 = std::chrono::steady_clock::now();
-  ldltB_.analyzePattern(*B_);
-  ldltB_.factorize(*B_);
-  const auto t1 = std::chrono::steady_clock::now();
-  const double sec = std::chrono::duration<double>(t1 - t0).count();
-
-  if (ldltB_.info() != Eigen::Success) {
-    throw std::runtime_error("prepare(): B factorization failed (LDLT info != Success).");
-  }
-
-  opsB_.solve = [this](const VectorXd& v, VectorXd& x) { x = ldltB_.solve(v); };
-  opsB_.block_solve = [this](const MatrixXd& V, MatrixXd& X) { X = ldltB_.solve(V); };
-
-  b_factorized_ = true;
-  b_factorization_sec_ = sec;
-
-  {
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(6) << sec;
-    print_kv("B Factorization (sec)", ss.str());
-  }
-
-  print_line("");
 }
 
 FASTEIG_INT fasteig_problem::solve() {
@@ -283,6 +247,9 @@ void fasteig_problem::set_executor(std::shared_ptr<fasteig::core::Executor> exec
   if (!exec) {
     throw std::invalid_argument("fasteig_problem::set_executor: null executor.");
   }
+  prepared_operator_.reset();
+  matrix_operator_.reset();
+  metric_operator_.reset();
   executor_ = std::move(exec);
 }
 
@@ -300,84 +267,77 @@ std::unique_ptr<fasteig::core::LinearOperator> fasteig_problem::make_linear_oper
   return build_linear_operator(opts, exec);
 }
 
+std::shared_ptr<const fasteig::core::LinearOperator> fasteig_problem::make_matrix_operator(
+    const fasteig::core::Executor& exec) const {
+  if (!matrix_operator_ || &matrix_operator_->executor() != &exec) {
+    if (exec.is_gpu()) {
+      if (!csrA_) throw std::invalid_argument("CUDA matrix operator requires a stored CSR matrix.");
+      matrix_operator_ = exec.create_csr_matrix(make_core_csr_data(*csrA_, n_));
+    } else {
+      matrix_operator_ = std::make_shared<fasteig::core::LegacyOperationsOperator>(exec, n_, opsA_);
+    }
+  }
+  return matrix_operator_;
+}
+
+std::shared_ptr<const fasteig::core::LinearOperator> fasteig_problem::make_metric_operator(
+    const fasteig::core::Executor& exec) const {
+  if (!B_) return nullptr;
+  if (!metric_operator_ || &metric_operator_->executor() != &exec) {
+    if (exec.is_gpu()) metric_operator_ = exec.create_csr_matrix(make_core_csr_data(*csrB_, n_));
+    else metric_operator_ = std::make_shared<fasteig::core::LegacyOperationsOperator>(exec, n_, opsB_);
+  }
+  return metric_operator_;
+}
+
 std::unique_ptr<fasteig::core::LinearOperator> fasteig_problem::build_linear_operator(
     const fasteig_options& opts,
     const fasteig::core::Executor& exec) {
   const bool use_sai = is_sai_which(opts.which());
+  if (!use_sai && !B_) {
+    // The owning problem keeps this original operator alive throughout the solve.
+    return std::make_unique<fasteig::core::ScaledLinearOperator>(*make_matrix_operator(exec), 1.0);
+  }
 
+  std::unique_ptr<fasteig::core::LinearOperator> inverse;
   if (exec.is_gpu()) {
-    if (use_sai) {
 #if defined(USE_CUDA) && defined(USE_CUDSS)
-      if (!csrA_) {
-        throw std::invalid_argument("fasteig_problem: CUDA SAI requires a stored CSR matrix.");
-      }
-      auto op = std::make_unique<fasteig::core::CudaShiftInvertOperator>(
-          exec, make_core_csr_data(*csrA_, n_), opts.shift(), false);
-
-      auto print_line = [&](const std::string& s) {
-        logger_.line(s);
-        if (opts.verbosity() >= 1) std::cout << s << "\n";
-      };
-
-      auto print_kv = [&](const char* key, const std::string& value) {
-        constexpr int kKeyWidth = 22;
-        std::ostringstream ss;
-        ss << "  " << std::left << std::setw(kKeyWidth) << key << ": " << value;
-        print_line(ss.str());
-      };
-
-      const auto& timings = op->solver().timings();
-      print_line("");
-      print_line("SAI SETUP");
-      print_line("=========");
-      print_line("");
-      print_kv("Factorization Backend", "NVIDIA cuDSS");
-      print_kv("Matrix Type", op->symmetric_mode() ? "Symmetric" : "General");
-      print_kv("Matrix View", op->symmetric_mode() ? "Lower" : "Full");
-      {
-        std::ostringstream ss;
-        ss << std::setprecision(16) << opts.shift();
-        print_kv("Shift", ss.str());
-      }
-      {
-        std::ostringstream ss;
-        ss << std::fixed << std::setprecision(6) << timings.matrix_setup_sec;
-        print_kv("Matrix Setup (sec)", ss.str());
-      }
-      {
-        std::ostringstream ss;
-        ss << std::fixed << std::setprecision(6) << timings.analysis_sec;
-        print_kv("Analyze Pattern (sec)", ss.str());
-      }
-      {
-        std::ostringstream ss;
-        ss << std::fixed << std::setprecision(6) << timings.factorization_sec;
-        print_kv("Factorization (sec)", ss.str());
-      }
-      {
-        std::ostringstream ss;
-        ss << std::fixed << std::setprecision(6) << timings.setup_sec;
-        print_kv("SAI Setup Total (sec)", ss.str());
-      }
-      print_line("");
-
-      return op;
+    if (!csrA_) throw std::invalid_argument("CUDA factorization requires a stored CSR matrix.");
+    auto factor_data = make_core_csr_data(use_sai ? *csrA_ : *csrB_, n_);
+    double identity_shift = use_sai ? opts.shift() : 0.0;
+    if (use_sai && B_) {
+      SpMat shifted = sparse_from_csr(*csrA_, n_) - opts.shift() * sparse_from_csr(*csrB_, n_);
+      factor_data = make_core_csr_data(build_csr_from_sparse_matrix(shifted, false, false), n_);
+      identity_shift = 0.0;  // A - shift*B has already been assembled.
+    }
+    // Reuse the established general/full cuDSS factorization, including for
+    // indefinite shifted matrices. Only solve phases occur in apply().
+    auto cuda_inverse = std::make_unique<fasteig::core::CudaShiftInvertOperator>(
+        exec, std::move(factor_data), identity_shift, false);
+    const auto& t = cuda_inverse->solver().timings();
+    const auto shift = use_sai ? std::optional<double>(opts.shift()) : std::nullopt;
+    const std::string matrix = use_sai ? (B_ ? "A - shift*B" : "A - shift*I") : "B";
+    logger_.print_factorization_setup("NVIDIA cuDSS (General/Full)", matrix, shift,
+                                      t.analysis_sec, t.factorization_sec, t.setup_sec, t.matrix_setup_sec);
+    if (opts.verbosity() >= 1) {
+      fasteig_logger console(&std::cout);
+      console.print_factorization_setup("NVIDIA cuDSS (General/Full)", matrix, shift,
+                                        t.analysis_sec, t.factorization_sec, t.setup_sec, t.matrix_setup_sec);
+    }
+    if (use_sai) sai_factorization_sec_ = t.factorization_sec;
+    else b_factorization_sec_ = t.factorization_sec;
+    inverse = std::move(cuda_inverse);
 #else
-      throw std::invalid_argument(
-          "fasteig_problem: CUDA SAI requires building with USE_CUDA=1 USE_CUDSS=1.");
+    throw std::invalid_argument("CUDA SAI/generalized problems require USE_CUDA=1 USE_CUDSS=1.");
 #endif
-    }
-    if (!csrA_) {
-      throw std::invalid_argument("fasteig_problem: CUDA executor requires a stored CSR matrix.");
-    }
-    return exec.create_csr_matrix(make_core_csr_data(*csrA_, n_));
+  } else {
+    inverse = std::make_unique<fasteig::core::LegacyOperationsOperator>(
+        exec, n_, use_sai ? opsSAI_ : opsInverseB_);
   }
-
-  const operations& op = solver_ops(opts);
-  if (!op.matvec) {
-    throw std::invalid_argument("fasteig_problem: selected operator has no matvec.");
-  }
-  return std::make_unique<fasteig::core::LegacyOperationsOperator>(exec, n_, op);
+  if (!B_) return inverse;
+  // Ordinary: B^{-1} A. Shift-invert: (A - shift*B)^{-1} B.
+  return std::make_unique<fasteig::core::ProductLinearOperator>(
+      std::move(inverse), use_sai ? make_metric_operator(exec) : make_matrix_operator(exec));
 }
 
 FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
@@ -409,9 +369,7 @@ FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
 
   solver_ = solver_name;
 
-  if (B_ && solver_name.rfind("KrylovSchur", 0) != 0) {
-    throw std::invalid_argument("Generalized eigenproblems (bmatrix) are only supported by KrylovSchur for now.");
-  }
+  if (B_) validate_generalized_solver(solver_name, is_sai_which(local.which()));
 
   const bool caller_provided_log = logger_.enabled();
   if (!caller_provided_log) {
@@ -435,7 +393,7 @@ FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
 
   prepare(local);
   auto exec = executor(local);
-  if (local.gpu_backend() && is_sai_which(local.which())) {
+  if (is_sai_which(local.which()) || B_) {
     prepare_linear_operator(local, *exec);
   }
 
@@ -461,19 +419,20 @@ FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
   const double runtime_sec = std::chrono::duration<double>(t1 - t0).count();
   last_iterations_ = solver->iterations();
 
-  resnrms_ = fasteig::fasteig_solver::compute_residual_norms(opsA_,
-                                                             B_ ? &opsB_ : nullptr,
-                                                             eigvals_,
-                                                             eigvecs_);
+  if (!is_krylov_solver(solver_name)) {
+    resnrms_ = fasteig::fasteig_solver::compute_residual_norms(
+        opsA_, B_ ? &opsB_ : nullptr, eigvals_, eigvecs_);
+  }
 
+  const auto b_setup = is_sai_which(local.which()) ? std::nullopt : b_factorization_sec_;
   if (logger_.enabled()) {
     logger_.write_results_text(status_, eigvals_, resnrms_,
-                               b_factorization_sec_, runtime_sec, last_iterations_);
+                               b_setup, runtime_sec, last_iterations_);
     logger_.flush();
   }
   if (verbosity >= 1) {
     stdout_logger.print_final_results(status_, eigvals_, resnrms_,
-                                      b_factorization_sec_, runtime_sec, last_iterations_);
+                                      b_setup, runtime_sec, last_iterations_);
   }
 
   if (!caller_provided_log) close_log();

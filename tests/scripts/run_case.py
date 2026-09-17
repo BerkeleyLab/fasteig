@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -123,24 +124,46 @@ def _which_pretty(which: str) -> str:
         return "Smallest"
     if w == "LR":
         return "Largest"
+    if w == "SAI":
+        return "Nearest shift (SAI)"
     return which
 
 
-def _select_ref_values(*, ref_path: Path, which: str, k: int) -> List[float]:
+def _select_ref_values(*, ref_path: Path, which: str, k: int, shift: float = 0.0) -> List[float]:
     spec = parse_scalapack_output(ref_path)
     w = which.upper()
     if w == "SR":
         return spec.smallest(k)
     if w == "LR":
         return spec.largest(k)
-    raise ValueError(f"Unsupported which for reference test: {which} (use SR or LR)")
+    if w == "SM":
+        return sorted(spec.eigenvalues, key=abs)[:k]
+    if w == "LM":
+        return sorted(spec.eigenvalues, key=abs, reverse=True)[:k]
+    if w == "BE":
+        ordered = sorted(spec.eigenvalues)
+        both = []
+        lo, hi = 0, len(ordered) - 1
+        while lo <= hi:
+            both.append(ordered[hi])
+            hi -= 1
+            if lo <= hi:
+                both.append(ordered[lo])
+                lo += 1
+        return both[:k]
+    if w == "SAI":
+        # SAI returns the k nearest eigenvalues in ascending algebraic order.
+        return sorted(sorted(spec.eigenvalues, key=lambda value: abs(value - shift))[:k])
+    raise ValueError(f"Unsupported which for reference test: {which} (use SR, LR, SM, LM, BE, or SAI)")
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Run a reference eigenvalue test (SciPy eigsh) on a MatrixMarket matrix.")
+    ap = argparse.ArgumentParser(description="Compare FASTEIG with ScaLAPACK reference eigenvalues on a MatrixMarket matrix.")
     ap.add_argument("--solver", required=True, help="Solver name (e.g., Lanczos, KrylovSchur)")
-    ap.add_argument("--which", required=True, choices=["SR", "LR"], help="Which end to test: SR or LR")
+    ap.add_argument("--which", required=True, choices=["SR", "LR", "SM", "LM", "BE", "SAI"], help="Spectrum selection; SAI targets eigenvalues nearest --shift")
+    ap.add_argument("--shift", type=float, default=0.0, help="Shift for SAI (default: 0)")
     ap.add_argument("--matrix", default="SiO", help="Matrix alias (e.g., SiO) or path to .mtx")
+    ap.add_argument("--bmatrix", default="", help="SPD B matrix for a generalized Krylov solver; requires an explicit --ref-file for (A,B)")
     ap.add_argument(
         "--ref-file",
         default="",
@@ -152,6 +175,8 @@ def main() -> int:
     ap.add_argument("--check-tol", type=float, default=1e-10, help="Assertion tolerance for residual norms (default: 1e-10)")
     ap.add_argument("--maxiter", type=int, default=2000, help="FASTEIG maxiter (default: 2000)")
     ap.add_argument("--seed", type=int, default=1, help="Random seed passed to FASTEIG (default: 1)")
+    ap.add_argument("--blksize", type=int, help="BlockLanczos/BlockKrylovSchur block width (otherwise use the input parser default)")
+    ap.add_argument("--maxdim", type=int, help="Maximum restarted subspace dimension (otherwise use the input parser default)")
 
     ap.add_argument("--print-every", type=int, default=0, help="print_every in FASTEIG input (0 disables)")
     ap.add_argument("--verbosity", type=int, default=1, choices=[1, 2], help="Verbosity for FASTEIG stdout")
@@ -168,9 +193,25 @@ def main() -> int:
     ap.add_argument("--traceback", action="store_true", help="On failure, print a Python traceback (default: off).")
 
     args = ap.parse_args()
+    if args.bmatrix:
+        if args.solver not in ("Lanczos", "BlockLanczos", "KrylovSchur", "BlockKrylovSchur") or not args.ref_file:
+            ap.error("--bmatrix requires a Krylov solver and an explicit generalized --ref-file")
+        if args.which == "SAI" and args.solver != "KrylovSchur":
+            ap.error("generalized SAI is currently supported only by KrylovSchur")
+    if args.k <= 0:
+        ap.error("--k must be positive")
+    if not math.isfinite(args.shift):
+        ap.error("--shift must be finite")
+    if args.blksize is not None and args.blksize <= 0:
+        ap.error("--blksize must be positive")
+    if args.maxdim is not None and args.maxdim <= 0:
+        ap.error("--maxdim must be positive")
 
     repo_root = Path(__file__).resolve().parents[2]
     matrix_path = resolve_matrix_arg(args.matrix)
+    bmatrix_path = resolve_matrix_arg(args.bmatrix) if args.bmatrix else None
+    if bmatrix_path is not None and not bmatrix_path.exists():
+        raise RuntimeError(f"B matrix not found: {bmatrix_path}")
     fasteig_exe = _resolve_fasteig_exe(repo_root, args.runfasteig)
     ref_path = (Path(args.ref_file).expanduser().resolve() if args.ref_file else default_ref_path_for_matrix(matrix_path))
 
@@ -182,7 +223,15 @@ def main() -> int:
     _banner("TEST CASE")
     _print_kv("Solver", args.solver)
     _print_kv("Which", _which_pretty(args.which))
+    if args.which == "SAI":
+        _print_kv("Shift", f"{args.shift:g}")
+    if args.blksize is not None:
+        _print_kv("Block size", str(args.blksize))
+    if args.maxdim is not None:
+        _print_kv("Max subspace dim", str(args.maxdim))
     _print_kv("Matrix", f"{args.matrix}  ({matrix_path})")
+    if bmatrix_path is not None:
+        _print_kv("B matrix", str(bmatrix_path))
     _print_kv("Ref file", str(ref_path))
     _print_kv("k", str(args.k))
     _print_kv("FASTEIG tol", f"{args.fasteig_tol:g}")
@@ -198,7 +247,7 @@ def main() -> int:
 
     _banner("REFERENCE (ScaLAPACK)")
     print("Loading reference eigenvalues...")
-    ref_vals = _select_ref_values(ref_path=ref_path, which=args.which, k=args.k)
+    ref_vals = _select_ref_values(ref_path=ref_path, which=args.which, k=args.k, shift=args.shift)
     print(f"Reference loaded  : {len(ref_vals)} values used (of full spectrum in {ref_path.name})")
     print("")
 
@@ -216,6 +265,15 @@ def main() -> int:
         stem = matrix_path.stem if matrix_path.suffix.lower() == ".mtx" else "matrix"
         logprefix = td_path / stem
 
+        extra_options = []
+        if bmatrix_path is not None:
+            extra_options.append(f"bmatrix {bmatrix_path}")
+        if args.which == "SAI":
+            extra_options.append(f"shift {args.shift}")
+        if args.blksize is not None:
+            extra_options.append(f"blksize {args.blksize}")
+        if args.maxdim is not None:
+            extra_options.append(f"maxdim {args.maxdim}")
         input_txt = "\n".join(
             [
                 f"amatrix {matrix_path}",
@@ -229,6 +287,7 @@ def main() -> int:
                 f"tol {args.fasteig_tol}",
                 f"verbosity {args.verbosity}",
                 f"print_every {args.print_every}",
+                *extra_options,
                 "",
             ]
         )

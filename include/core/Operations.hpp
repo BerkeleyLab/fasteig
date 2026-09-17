@@ -32,7 +32,8 @@ void orthogonalize_active_columns(const MultiVector& X,
 double orthogonalize_active_columns(const MultiVector& X,
                                     FASTEIG_INT active_cols,
                                     const Vector& source,
-                                    Vector& residual);
+                                    Vector& residual,
+                                    const MultiVector* dual_basis = nullptr);
 
 void apply(const LinearOperator& op,
            const Vector& x,

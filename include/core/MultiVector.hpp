@@ -32,9 +32,12 @@ public:
   virtual VectorXd copy_column_to_host(FASTEIG_INT col) const = 0;
   virtual double column_dot(FASTEIG_INT col, const Vector& x) const = 0;
   virtual void column_axpy(double alpha, FASTEIG_INT col, Vector& y) const = 0;
+  // Two-pass Gram-Schmidt: project with dual_basis^T, subtract with this
+  // basis. Pass B*Q as dual_basis for a B-orthonormal Q; nullptr uses Q itself.
   virtual double orthogonalize_active_columns(FASTEIG_INT active_cols,
                                               const Vector& source,
-                                              Vector& residual) const = 0;
+                                              Vector& residual,
+                                              const MultiVector* dual_basis = nullptr) const = 0;
   virtual void orthogonalize_active_columns(FASTEIG_INT active_cols,
                                             const Vector& source,
                                             Vector& residual,
@@ -82,7 +85,8 @@ public:
   void column_axpy(double alpha, FASTEIG_INT col, Vector& y) const override;
   double orthogonalize_active_columns(FASTEIG_INT active_cols,
                                       const Vector& source,
-                                      Vector& residual) const override;
+                                      Vector& residual,
+                                      const MultiVector* dual_basis = nullptr) const override;
   void orthogonalize_active_columns(FASTEIG_INT active_cols,
                                     const Vector& source,
                                     Vector& residual,

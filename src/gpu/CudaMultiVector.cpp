@@ -271,7 +271,8 @@ void CudaMultiVector::orthogonalize_active_columns(FASTEIG_INT active_cols,
 
 double CudaMultiVector::orthogonalize_active_columns(FASTEIG_INT active_cols,
                                                      const Vector& source,
-                                                     Vector& residual) const {
+                                                     Vector& residual,
+                                                     const MultiVector* dual_basis) const {
   if (active_cols < 0 || active_cols > cols_) {
     throw std::invalid_argument("CudaMultiVector::orthogonalize_active_columns: invalid active column count.");
   }
@@ -283,10 +284,14 @@ double CudaMultiVector::orthogonalize_active_columns(FASTEIG_INT active_cols,
     return 0.0;
   }
 
+  const auto* dual = dual_basis ? dynamic_cast<const CudaMultiVector*>(dual_basis) : this;
+  if (!dual || &dual->executor() != &exec_ || dual->rows() != rows_ || dual->cols() < active_cols) {
+    throw std::invalid_argument("CudaMultiVector::orthogonalize_active_columns: invalid dual basis.");
+  }
   auto& context = cuda_executor_from(exec_, "CudaMultiVector::orthogonalize_active_columns").context();
   ensure_orthog_workspace(active_cols);
 
-  orthogonalize_active_columns_device_coeffs(active_cols, source, residual, d_h_, d_s_);
+  orthogonalize_active_columns_device_coeffs(active_cols, source, residual, d_h_, d_s_, dual);
 
   double alpha = 0.0;
   FASTEIG_CUDA_CHECK(cudaMemcpyAsync(&alpha, d_h_ + static_cast<std::size_t>(active_cols - 1),
@@ -473,7 +478,8 @@ void CudaMultiVector::orthogonalize_active_columns_device_coeffs(FASTEIG_INT act
                                                                  const Vector& source,
                                                                  Vector& residual,
                                                                  double* d_coeffs,
-                                                                 double* d_correction) const {
+                                                                 double* d_correction,
+                                                                 const CudaMultiVector* dual_basis) const {
   if (active_cols < 0 || active_cols > cols_) {
     throw std::invalid_argument(
         "CudaMultiVector::orthogonalize_active_columns_device_coeffs: invalid active column count.");
@@ -501,6 +507,7 @@ void CudaMultiVector::orthogonalize_active_columns_device_coeffs(FASTEIG_INT act
                                    cuda_source->data(), 1, cuda_residual->data(), 1));
   if (active_cols == 0) return;
 
+  const double* projection_values = dual_basis ? dual_basis->data() : d_values_;
   const double one = 1.0;
   const double zero = 0.0;
   const double minus_one = -1.0;
@@ -509,7 +516,7 @@ void CudaMultiVector::orthogonalize_active_columns_device_coeffs(FASTEIG_INT act
 
   FASTEIG_CUBLAS_CHECK(cublasDgemv(context.cublas_handle(), CUBLAS_OP_T,
                                    nrows, ncols,
-                                   &one, d_values_, nrows,
+                                   &one, projection_values, nrows,
                                    cuda_source->data(), 1,
                                    &zero, d_coeffs, 1));
   FASTEIG_CUBLAS_CHECK(cublasDgemv(context.cublas_handle(), CUBLAS_OP_N,
@@ -519,7 +526,7 @@ void CudaMultiVector::orthogonalize_active_columns_device_coeffs(FASTEIG_INT act
                                    &one, cuda_residual->data(), 1));
   FASTEIG_CUBLAS_CHECK(cublasDgemv(context.cublas_handle(), CUBLAS_OP_T,
                                    nrows, ncols,
-                                   &one, d_values_, nrows,
+                                   &one, projection_values, nrows,
                                    cuda_residual->data(), 1,
                                    &zero, d_correction, 1));
   FASTEIG_CUBLAS_CHECK(cublasDaxpy(context.cublas_handle(), ncols,

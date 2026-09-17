@@ -81,6 +81,11 @@ public:
   std::unique_ptr<fasteig::core::LinearOperator> make_linear_operator(
       const fasteig_options& opts,
       const fasteig::core::Executor& exec);
+  // Original A and optional B, independent of any spectral transformation.
+  std::shared_ptr<const fasteig::core::LinearOperator> make_matrix_operator(
+      const fasteig::core::Executor& exec) const;
+  std::shared_ptr<const fasteig::core::LinearOperator> make_metric_operator(
+      const fasteig::core::Executor& exec) const;
 
   // Solver setup that needs explicit factorizations (SAI and generalized B).
   void prepare(const fasteig_options& opts);
@@ -138,12 +143,16 @@ private:
   std::optional<std::reference_wrapper<const fasteig_params>> params_;
   std::optional<SpMat> H_;
   std::optional<CsrMatrixData> csrA_;
+  std::optional<CsrMatrixData> csrB_;
   std::optional<SpMat> B_;
   operations opsA_{};
   operations opsB_{};
   operations opsSAI_{};
+  operations opsInverseB_{};
   std::shared_ptr<fasteig::core::Executor> executor_;
   std::unique_ptr<fasteig::core::LinearOperator> prepared_operator_;
+  mutable std::shared_ptr<const fasteig::core::LinearOperator> matrix_operator_;
+  mutable std::shared_ptr<const fasteig::core::LinearOperator> metric_operator_;
   FASTEIG_INT n_ = 0;
 
   FASTEIG_INT ns_ = 0;

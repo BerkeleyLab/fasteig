@@ -39,13 +39,16 @@ public:
                                                  FASTEIG_INT nev,
                                                  const std::string& which,
                                                  bool need_vectors,
-                                                 const char* solver_name) = 0;
+                                                 const char* solver_name,
+                                                 FASTEIG_INT active_dim = 0) = 0;
 
   virtual void prepare_krylov_schur_restart(
       FASTEIG_INT retained_cols,
       const LanczosSnapshot& snapshot,
       const char* solver_name) = 0;
 
+  // Seed a retained_dim-by-retained_dim Ritz diagonal and the full
+  // block_size-by-retained_dim coupling to the residual block.
   virtual void prepare_block_krylov_schur_restart(
       FASTEIG_INT block_size,
       const VectorXd& retained_values,
@@ -88,7 +91,8 @@ public:
                                          FASTEIG_INT nev,
                                          const std::string& which,
                                          bool need_vectors,
-                                         const char* solver_name) override;
+                                         const char* solver_name,
+                                         FASTEIG_INT active_dim = 0) override;
 
   void prepare_krylov_schur_restart(
       FASTEIG_INT retained_cols,

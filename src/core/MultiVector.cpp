@@ -152,7 +152,8 @@ void CpuMultiVector::orthogonalize_active_columns(FASTEIG_INT active_cols,
 
 double CpuMultiVector::orthogonalize_active_columns(FASTEIG_INT active_cols,
                                                     const Vector& source,
-                                                    Vector& residual) const {
+                                                    Vector& residual,
+                                                    const MultiVector* dual_basis) const {
   if (active_cols < 0 || active_cols > cols()) {
     throw std::invalid_argument("CpuMultiVector::orthogonalize_active_columns: invalid active column count.");
   }
@@ -169,11 +170,16 @@ double CpuMultiVector::orthogonalize_active_columns(FASTEIG_INT active_cols,
   cpu_residual->values() = cpu_source->values();
   if (active_cols == 0) return 0.0;
 
+  const auto* dual = dual_basis ? dynamic_cast<const CpuMultiVector*>(dual_basis) : this;
+  if (!dual || &dual->executor() != &exec_ || dual->rows() != rows() || dual->cols() < active_cols) {
+    throw std::invalid_argument("CpuMultiVector::orthogonalize_active_columns: invalid dual basis.");
+  }
+  const auto W_active = dual->values_.leftCols(static_cast<int>(active_cols));
   const auto V_active = values_.leftCols(static_cast<int>(active_cols));
-  Eigen::VectorXd h = V_active.transpose() * cpu_source->values();
+  Eigen::VectorXd h = W_active.transpose() * cpu_source->values();
   cpu_residual->values().noalias() -= V_active * h;
 
-  Eigen::VectorXd s = V_active.transpose() * cpu_residual->values();
+  Eigen::VectorXd s = W_active.transpose() * cpu_residual->values();
   cpu_residual->values().noalias() -= V_active * s;
   h += s;
 

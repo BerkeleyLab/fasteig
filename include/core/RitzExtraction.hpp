@@ -11,6 +11,7 @@ namespace fasteig {
 namespace core {
 
 class MultiVector;
+class LinearOperator;
 
 struct LanczosSnapshot {
   VectorXd lam;
@@ -23,6 +24,20 @@ struct ProjectedRitzPairs {
   VectorXd relative_residuals;
   MatrixXd coefficients;
 };
+
+// Assemble Ritz vectors and verify the ORIGINAL eigenproblem on their executor.
+// B == nullptr denotes the identity. Only values/norms are returned to the host.
+VectorXd evaluate_ritz_pairs(const LinearOperator& A,
+                             const LinearOperator* B,
+                             const MultiVector& basis,
+                             FASTEIG_INT active_cols,
+                             const LanczosSnapshot& snapshot,
+                             const std::string& which,
+                             double shift,
+                             MultiVector& ritz_vectors,
+                             MultiVector& residuals,
+                             MultiVector& metric_vectors,
+                             VectorXd& eigenvalues);
 
 ProjectedRitzPairs extract_projected_ritz_pairs(
     const MatrixXd& projected_matrix,
@@ -73,7 +88,8 @@ LanczosSnapshot block_lanczos_compute_cpu_snapshot(const MatrixXd& T,
                                                    const MatrixXd& beta,
                                                    const std::string& which,
                                                    bool need_vectors,
-                                                   const char* solver_name);
+                                                   const char* solver_name,
+                                                   FASTEIG_INT active_dim = 0);
 
 LanczosSnapshot block_lanczos_make_snapshot_from_eigendecomp(const VectorXd& eigenvalues,
                                                              const MatrixXd& eigenvectors,
@@ -103,6 +119,15 @@ LanczosSnapshot lanczos_snapshot_head(const LanczosSnapshot& snapshot,
                                       const char* solver_name);
 
 VectorXd lanczos_absolute_residuals(const LanczosSnapshot& snapshot);
+
+// Report SAI Ritz values as lambda = shift + 1/mu, preserving selection order
+// and inverse-operator residual estimates. The working snapshot is unchanged.
+// Coefficients are not needed for output and are omitted from the result.
+LanczosSnapshot lanczos_progress_snapshot(
+    const LanczosSnapshot& snapshot,
+    const std::string& which,
+    FASTEIG_DOUBLE shift,
+    const char* solver_name);
 
 LanczosSnapshot krylov_schur_progress_snapshot(
     const LanczosSnapshot& snapshot,
