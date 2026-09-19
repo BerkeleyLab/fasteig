@@ -44,12 +44,9 @@ bool is_krylov_solver(const std::string& name) {
          name.rfind("KrylovSchur", 0) == 0 || name.rfind("BlockKrylovSchur", 0) == 0;
 }
 
-void validate_generalized_solver(const std::string& name, bool use_sai) {
+void validate_generalized_solver(const std::string& name) {
   if (!is_krylov_solver(name)) {
     throw std::invalid_argument("Generalized problems require Lanczos, BlockLanczos, KrylovSchur or BlockKrylovSchur.");
-  }
-  if (use_sai && name.rfind("KrylovSchur", 0) != 0) {
-    throw std::invalid_argument("Generalized SAI is currently supported only by KrylovSchur.");
   }
 }
 
@@ -135,7 +132,7 @@ void fasteig_problem::prepare(const fasteig_options& opts) {
   if (!H_ || !csrA_) throw std::invalid_argument("prepare(): factorization requires a stored matrix.");
   if (B_) {
     const std::string solver_name = opts.solver().empty() ? solver_ : opts.solver();
-    validate_generalized_solver(solver_name.empty() ? "Lanczos" : solver_name, use_sai);
+    validate_generalized_solver(solver_name.empty() ? "Lanczos" : solver_name);
     require_symmetric(sparse_from_csr(*csrA_, n_), "A");
     require_symmetric(sparse_from_csr(*csrB_, n_), "B");
   }
@@ -369,7 +366,7 @@ FASTEIG_INT fasteig_problem::solve(const fasteig_options& opts) {
 
   solver_ = solver_name;
 
-  if (B_) validate_generalized_solver(solver_name, is_sai_which(local.which()));
+  if (B_) validate_generalized_solver(solver_name);
 
   const bool caller_provided_log = logger_.enabled();
   if (!caller_provided_log) {

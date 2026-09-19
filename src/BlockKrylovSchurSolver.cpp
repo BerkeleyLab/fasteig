@@ -39,9 +39,6 @@ FASTEIG_INT BlockKrylovSchurSolver::solve() {
   if (maxiter <= 0) {
     throw std::invalid_argument("BlockKrylovSchurSolver: maxiter must be > 0.");
   }
-  if (problem_.is_generalized() && which == "sai") {
-    throw std::invalid_argument("Generalized SAI is currently supported only by KrylovSchur.");
-  }
   core::validate_lanczos_which(
       which, /*allow_sai=*/true, "BlockKrylovSchurSolver");
 
@@ -80,8 +77,8 @@ FASTEIG_INT BlockKrylovSchurSolver::solve() {
 
   // Executor-owned state. CPU and CUDA share the algorithm below; vectors,
   // block operations, QR, and projected storage are backend implementations.
-  // For SAI the operator factors A - shift*I once and reuses those factors
-  // for every block solve, including across restarts.
+  // SAI factors A - shift*B once (B=I for standard problems) and reuses
+  // those factors for every block solve, including across restarts.
   std::shared_ptr<core::Executor> exec = problem_.executor(options_);
   std::unique_ptr<core::LinearOperator> op =
       problem_.make_linear_operator(options_, *exec);

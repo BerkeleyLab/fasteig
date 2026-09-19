@@ -38,9 +38,6 @@ FASTEIG_INT LanczosSolver::solve() {
   if (nev <= 0) throw std::invalid_argument("LanczosSolver: nev must be > 0.");
   if (maxiter < nev) throw std::invalid_argument("LanczosSolver: maxiter must be >= nev.");
   if (maxiter > n) throw std::invalid_argument("LanczosSolver: maxiter must be <= n.");
-  if (problem_.is_generalized() && which == "sai") {
-    throw std::invalid_argument("Generalized SAI is currently supported only by KrylovSchur.");
-  }
   core::validate_lanczos_which(which, /*allow_sai=*/true, "LanczosSolver");
 
   // Progress output setup.  A scalar Lanczos "iteration" is one Krylov vector
@@ -112,7 +109,9 @@ FASTEIG_INT LanczosSolver::solve() {
     core::LanczosSnapshot snap = lanczos_workspace->compute_snapshot(
         m, nev, which, /*need_vectors=*/false, "LanczosSolver");
     if (do_progress) {
-      core::lanczos_emit_snapshot(snap, m, log_logger, console_logger);
+      core::lanczos_emit_snapshot(
+          core::lanczos_progress_snapshot(snap, which, options_.shift(), "LanczosSolver"),
+          m, log_logger, console_logger);
       last_emitted_iter = m;
     }
 
@@ -133,7 +132,9 @@ FASTEIG_INT LanczosSolver::solve() {
       converged = true;
       it_stop = m;
       if (!do_progress && print_every > 0) {
-        core::lanczos_emit_snapshot(final, m, log_logger, console_logger);
+        core::lanczos_emit_snapshot(
+            core::lanczos_progress_snapshot(final, which, options_.shift(), "LanczosSolver"),
+            m, log_logger, console_logger);
       }
       break;
     }
@@ -143,7 +144,9 @@ FASTEIG_INT LanczosSolver::solve() {
     final = lanczos_workspace->compute_snapshot(maxiter, nev, which,
                                                 /*need_vectors=*/true, "LanczosSolver");
     if (print_every > 0 && last_emitted_iter != maxiter) {
-      core::lanczos_emit_snapshot(final, maxiter, log_logger, console_logger);
+      core::lanczos_emit_snapshot(
+          core::lanczos_progress_snapshot(final, which, options_.shift(), "LanczosSolver"),
+          maxiter, log_logger, console_logger);
     }
   }
 

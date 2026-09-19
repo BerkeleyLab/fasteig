@@ -72,7 +72,7 @@ for V100, `80` for A100, `90` for H100, or a list such as `"80;90"`.
 | --- | --- | --- |
 | `CMAKE_BUILD_TYPE` | `Release` | Only `Release` and `Debug` are accepted. |
 | `PLAT` | `Generic` | Platform name; becomes part of the library filename. |
-| `ENABLE_CUDA` | `OFF` | Build the NVIDIA GPU backend from `src/gpu`. |
+| `ENABLE_CUDA` | `AUTO` with tests; otherwise `OFF` | `AUTO` enables CUDA if a compiler is found; explicit `ON`/`OFF` override detection. Cached choices are preserved. |
 | `USE_CUDSS` | `ON` | Use the NVIDIA cuDSS sparse direct solver. Inert unless `ENABLE_CUDA=ON`. |
 | `USE_MKL` | `OFF` | Use Intel MKL for BLAS/LAPACK. |
 | `USE_LIBSCI` | `OFF` | Use Cray LibSci for BLAS/LAPACK. |
@@ -162,7 +162,7 @@ Because cuDSS is a shared library outside the default loader path, the build
 bakes an RPATH into every executable. Verify it resolves:
 
 ```bash
-ldd build-cuda/examples/runfasteig | grep cudss
+ldd build-cuda/examples/runfasteig_gpu | grep cudss
 ```
 
 If it reports `not found`, add the cuDSS `lib` directory to `LD_LIBRARY_PATH`.
@@ -302,11 +302,11 @@ For the executor-aware solvers, the CPU and GPU executables use the same input
 deck. Keep the solver name in the input file and select the backend by
 executable.
 
-> **Naming difference between build systems.** The CMake build produces a single
-> `runfasteig` executable per build directory rather than the `_cpu`/`_gpu`
-> pair, since the backend is fixed at configure time. Run
-> `build/examples/runfasteig` for the CPU build and
-> `build-cuda/examples/runfasteig` for the GPU build.
+Both Make and CMake build `runfasteig_cpu`, plus `runfasteig_gpu` when CUDA is
+enabled. CMake places them in `<build-dir>/examples/`. A CUDA-enabled build
+contains both executables, so the same build can test both executors.
+See [the testing guide](tests/README.md) for automated SiO and generalized
+Kuu/Muu reference tests, CTest, and Perlmutter launch settings.
 
 ### Input file format
 
@@ -330,9 +330,8 @@ The GPU executable dispatches `Lanczos`, `BlockLanczos`, `KrylovSchur`,
 `BlockKrylovSchur`, `Davidson`, `Chebyshev`, and `LOBPCG` through the CUDA executor. These CUDA paths
 support standard stored-matrix problems. `Lanczos`, `BlockLanczos`, `KrylovSchur`,
 and `BlockKrylovSchur` also support generalized `A*x = lambda*B*x` on CPU and CUDA
-for `SR`, `LR`, `SM`, `LM`, and `BE`, with symmetric A and symmetric positive-definite
-B. Generalized `SAI` is supported by `KrylovSchur` only. Other solvers still require
-standard problems.
+for `SR`, `LR`, `SM`, `LM`, `BE`, and `SAI`, with symmetric A and symmetric
+positive-definite B. Other solvers still require standard problems.
 
 `which SAI` is available for `Lanczos`, `BlockLanczos`, `KrylovSchur`, and
 `BlockKrylovSchur` on standard problems. It targets the eigenvalues nearest
@@ -342,7 +341,7 @@ MKL PardisoLDLT or Eigen SimplicialLDLT backend. Davidson, Chebyshev, and LOBPCG
 do not support `SAI`.
 
 For any of these generalized Krylov solvers, add `bmatrix path/to/B.mtx`. Ordinary selection
-uses `B^-1 A` with one B factorization. In Krylov–Schur, `which SAI` uses
+uses `B^-1 A` with one B factorization. For all four solvers, `which SAI` uses
 `(A - shift*B)^-1 B`, factors only `A - shift*B`, and returns eigenvalues nearest
 the shift. CUDA requires cuDSS for **all** generalized choices, not only SAI.
 The shifted matrix may be indefinite; the CUDA path reuses cuDSS General/Full.
@@ -397,10 +396,10 @@ rounded to whole blocks. A very small cycle can converge slowly: for SiO with
 `nev 5`, `blksize 5`, and `tol 1e-8`, prefer trying `maxdim 40` over `maxdim 10`.
 Block Krylov–Schur verifies the original-problem residuals before accepting
 convergence and returns a nonzero status if the tolerance is not met.
-Both block solvers report backtransformed eigenvalues in SAI progress; the
+Lanczos and both block solvers report backtransformed eigenvalues in SAI progress; the
 progress residuals remain relative estimates for the inverse operator. Final
 eigenpairs are sorted algebraically and final residuals are evaluated against
-the original matrix A.
+the original problem (`A*x-lambda*x` or `A*x-lambda*B*x`).
 
 Chebyshev supports `SR` and `LR` for standard problems on both executors. Its
 filter recurrence, trial blocks, Cholesky QR, deflation, Ritz-vector rotation,
@@ -435,7 +434,7 @@ without requiring an input deck:
 ./runfasteig_cpu --build-info
 ```
 
-For CMake builds, use `build/examples/runfasteig` instead. Development builds
+For CMake builds, use `build/examples/runfasteig_cpu` instead. Development builds
 from a Git checkout append the abbreviated commit to the release version and
 mark builds made from a modified source tree as `dirty`.
 

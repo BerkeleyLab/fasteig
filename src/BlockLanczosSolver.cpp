@@ -47,9 +47,6 @@ FASTEIG_INT BlockLanczosSolver::solve() {
     throw std::invalid_argument("BlockLanczosSolver: need maxiter*blksize >= nev.");
   }
 
-  if (problem_.is_generalized() && which == "sai") {
-    throw std::invalid_argument("Generalized SAI is currently supported only by KrylovSchur.");
-  }
   core::validate_lanczos_which(which, /*allow_sai=*/true, "BlockLanczosSolver");
 
   // Progress output mirrors LanczosSolver's logger setup.  For Block Lanczos,
@@ -62,8 +59,8 @@ FASTEIG_INT BlockLanczosSolver::solve() {
 
   // Executor-owned objects.  CPU and CUDA differ only behind the executor,
   // operator, multivectors, and workspace implementations.
-  // For SAI the operator reuses a factorization of A - shift*I and solves
-  // for an entire block at each application.
+  // SAI reuses a factorization of A - shift*B (B=I for standard problems)
+  // and solves for an entire block at each application.
   std::shared_ptr<core::Executor> exec = problem_.executor(options_);
   std::unique_ptr<core::LinearOperator> op = problem_.make_linear_operator(options_, *exec);
   const FASTEIG_INT projection_dim = static_cast<FASTEIG_INT>((max_blocks + 1) * b);
