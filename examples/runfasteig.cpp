@@ -6,6 +6,7 @@
 #include "fasteig_problem.hpp"
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -22,6 +23,13 @@ std::string lower_copy(std::string s) {
 
 int main(int argc, const char* argv[])
 {
+#ifdef FASTEIG_GPU_EXEC
+  const bool gpu_exec = true;
+#elif defined(FASTEIG_CPU_EXEC)
+  const bool gpu_exec = false;
+#else
+  const bool gpu_exec = lower_copy(std::filesystem::path(argv[0]).filename().string()).find("gpu") != std::string::npos;
+#endif
   if (argc == 2) {
     fasteig_logger cli_logger(&std::cout);
     const std::string argument = argv[1];
@@ -32,6 +40,20 @@ int main(int argc, const char* argv[])
     if (argument == "--build-info") {
       cli_logger.print_build_info();
       return 0;
+    }
+    if (argument == "--backend") {
+      cli_logger.line(gpu_exec ? "CUDA" : "CPU");
+      return 0;
+    }
+    if (argument == "--check-runtime") {
+      try {
+        fasteig::core::make_executor(gpu_exec)->synchronize();
+        cli_logger.line("Runtime available");
+        return 0;
+      } catch (const std::exception& error) {
+        cli_logger.line(std::string("Runtime unavailable: ") + error.what());
+        return 77;
+      }
     }
     if (argument == "--help" || argument == "-h") {
       cli_logger.print_usage(argv[0]);
@@ -67,12 +89,6 @@ int main(int argc, const char* argv[])
   // Option B: override/extend defaults with an explicit options object.
   fasteig_options opts;
   opts.configure_from(params);
-  const std::string exe_l = lower_copy(argv[0]);
-#ifdef FASTEIG_GPU_EXEC
-  const bool gpu_exec = true;
-#else
-  const bool gpu_exec = (exe_l.find("gpu") != std::string::npos);
-#endif
   const std::string solver_l = lower_copy(opts.solver());
   if (gpu_exec && (solver_l == "lanczos" || solver_l == "gpulanczos" ||
                    solver_l == "blocklanczos" || solver_l == "gpublocklanczos" ||

@@ -305,8 +305,8 @@ executable.
 Both Make and CMake build `runfasteig_cpu`, plus `runfasteig_gpu` when CUDA is
 enabled. CMake places them in `<build-dir>/examples/`. A CUDA-enabled build
 contains both executables, so the same build can test both executors.
-See [the testing guide](tests/README.md) for automated SiO and generalized
-Kuu/Muu reference tests, CTest, and Perlmutter launch settings.
+See [the testing guide](tests/README.md) for default SiO/SR reference tests,
+optional generalized Kuu/Muu tests, CTest, and Perlmutter launch settings.
 
 ### Input file format
 

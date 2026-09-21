@@ -2,366 +2,379 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 from pathlib import Path
+import re
+import shlex
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
-from typing import List
+import traceback
 
 from fasteig_log import parse_final_results
-from matrix_registry import resolve_matrix_arg
-from ref_eigs import default_ref_path_for_matrix, parse_scalapack_output
+from matrix_registry import matrix_dimension, resolve_problem
+from ref_eigs import parse_reference_spectrum
 
 
-def _run_fasteig(fasteig_exe: Path, input_path: Path, cwd: Path) -> None:
-    proc = subprocess.run(
-        [str(fasteig_exe), str(input_path)],
-        cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"FASTEIG executable failed (code {proc.returncode}). Output:\n{proc.stdout}")
+SOLVERS = ("Lanczos", "BlockLanczos", "KrylovSchur", "BlockKrylovSchur",
+           "LOBPCG", "Davidson", "Chebyshev")
+KRYLOV_SOLVERS = SOLVERS[:4]
+BLOCK_SOLVERS = ("BlockLanczos", "BlockKrylovSchur")
+RESTARTED_SOLVERS = ("KrylovSchur", "BlockKrylovSchur")
+SELECTIONS = ("SR", "LR", "SM", "LM", "BE", "SAI")
+DEFAULT_K = 5
+DEFAULT_TOL = 1e-8
+DEFAULT_EIG_TOL = 1e-10
+DEFAULT_MAXITER = 2000
+DEFAULT_BLOCK_SIZE = 10
+DEFAULT_MAXDIM = 40
+SKIP_CODE = 77
 
 
-def _resolve_fasteig_exe(repo_root: Path, requested: str) -> Path:
+def selections(solver: str) -> tuple[str, ...]:
+    return SELECTIONS if solver in KRYLOV_SOLVERS else ("SR", "LR")
+
+
+def unsupported_reason(solver: str, which: str, generalized: bool) -> str | None:
+    if solver not in SOLVERS:
+        return f"Unknown solver: {solver}"
+    if which not in selections(solver):
+        return f"{solver}/{which} is not in this harness's test policy."
+    if generalized and solver not in KRYLOV_SOLVERS:
+        return f"{solver} does not support generalized problems."
+    return None
+
+
+def argument_parser(description: str):
+    result = argparse.ArgumentParser(description=description,
+                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    result.add_argument("--matrix", default="SiO", help="SiO, KuuMuu, or an A matrix path")
+    result.add_argument("--bmatrix", default="", help="B matrix for a custom generalized problem")
+    result.add_argument("--ref-file", default="", help="Full reference spectrum; inferred for registered problems")
+    result.add_argument("--shift", type=float, help="SAI shift (SiO: 2; KuuMuu: 100; custom: 0)")
+    for flag, default, help_text in (
+        ("k", DEFAULT_K, "Requested eigenpair count"),
+        ("maxiter", DEFAULT_MAXITER, "Iteration limit"),
+        ("blksize", DEFAULT_BLOCK_SIZE, "Block-method width"),
+        ("maxdim", DEFAULT_MAXDIM, "Krylov-Schur subspace dimension"),
+        ("seed", 1, "Initial-vector seed"),
+        ("print-every", 0, "Solver progress cadence"),
+    ):
+        result.add_argument("--" + flag, type=int, default=default, help=help_text)
+    for flag, default, help_text in (
+        ("fasteig-tol", DEFAULT_TOL, "Solver tolerance"),
+        ("check-tol", DEFAULT_TOL, "Final residual tolerance"),
+        ("eig-atol", DEFAULT_EIG_TOL, "Eigenvalue absolute tolerance"),
+        ("eig-rtol", DEFAULT_EIG_TOL, "Eigenvalue relative tolerance"),
+        ("timeout", 3600, "Per-solver-run timeout in seconds"),
+    ):
+        result.add_argument("--" + flag, type=float, default=default, help=help_text)
+    result.add_argument("--verbosity", type=int, choices=(1, 2), default=1, help="Solver verbosity")
+    result.add_argument("--runfasteig", default="", help="Executable; defaults to examples/runfasteig_cpu")
+    result.add_argument("--profile", choices=("auto", "local", "perlmutter"), default="auto", help="Launch/environment profile")
+    result.add_argument("--launcher", choices=("auto", "direct", "srun"), default="auto", help="Launcher override")
+    result.add_argument("--threads", type=int, help="Override thread count and srun CPUs")
+    result.add_argument("--allow-unavailable", action="store_true", help="Skip unavailable GPU/allocation/cuDSS (CTest mode)")
+    result.add_argument("--keep-tmp", action="store_true", help="Keep generated inputs, stdout, and logs")
+    result.add_argument("--dry-run", action="store_true", help="Print cases, decks, and launch settings without solving")
+    result.add_argument("--traceback", action="store_true", help="Print Python tracebacks on failures")
+    return result
+
+
+class Unavailable(RuntimeError):
+    pass
+
+
+def resolve_executable(requested: str) -> Path:
+    root = Path(__file__).resolve().parents[2]
     if requested:
-        p = Path(requested).expanduser()
-        candidates = [p if p.is_absolute() else (repo_root / p)]
-        if not p.is_absolute() and len(p.parts) == 1:
-            candidates.append(repo_root / "examples" / p)
+        path = Path(requested).expanduser()
+        candidates = [path, root / path, root / "examples" / path]
     else:
-        candidates = [
-            repo_root / "examples" / "runfasteig",
-            repo_root / "examples" / "runfasteig_cpu",
-        ]
-
+        candidates = [root / "examples" / name for name in ("runfasteig_cpu", "runfasteig")]
     for candidate in candidates:
-        resolved = candidate.resolve()
-        if resolved.exists():
-            return resolved
-
-    tried = ", ".join(str(c.resolve()) for c in candidates)
-    raise RuntimeError(f"FASTEIG executable not found. Tried: {tried}. Build it first (see tests/README.md).")
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate.resolve()
+    raise ValueError(f"Executable not found or not executable: {requested or candidates[0]}")
 
 
-def _max_abs_diff(a, b) -> float:
-    return max(abs(x - y) for x, y in zip(a, b))
-
-def _eig_error_ok(*, got: float, ref: float, atol: float, rtol: float) -> bool:
-    return abs(got - ref) <= (atol + rtol * abs(ref))
-
-def _eig_error_rows(*, got_vals: List[float], ref_vals: List[float], atol: float, rtol: float):
-    n = min(len(got_vals), len(ref_vals))
-    bad = []
-    max_abs = 0.0
-    max_rel = 0.0
-    max_allow = 0.0
-    for i in range(n):
-        dabs = abs(got_vals[i] - ref_vals[i])
-        drel = dabs / (1.0 + abs(ref_vals[i]))
-        allow = atol + rtol * abs(ref_vals[i])
-        allow_rel = allow / (1.0 + abs(ref_vals[i]))
-        max_abs = max(max_abs, dabs)
-        max_rel = max(max_rel, drel)
-        max_allow = max(max_allow, allow)
-        if dabs > allow:
-            bad.append((i + 1, drel, allow_rel))
-    return bad, max_abs, max_rel, max_allow
-
-
-def _print_comparison_table(
-    *,
-    got_vals: List[float],
-    got_res: List[float],
-    ref_vals: List[float],
-) -> None:
-    n = min(len(got_vals), len(ref_vals), len(got_res))
-    print("")
-    print("RESULTS (FASTEIG vs Reference)")
-    print("------------------------------")
-    w_idx = 5
-    w_ev = 24
-    w_drel = 10
-    w_res = 14
-    print(
-        f"{'Index':>{w_idx}}  "
-        f"{'FASTEIG Eigenvalue':>{w_ev}}  "
-        f"{'Ref Eigenvalue':>{w_ev}}  "
-        f"{'RelΔ':>{w_drel}}  "
-        f"{'FASTEIG Residual':>{w_res}}"
-    )
-    for i in range(n):
-        dabs = abs(got_vals[i] - ref_vals[i])
-        drel = dabs / (1.0 + abs(ref_vals[i]))
-        print(
-            f"{i+1:>{w_idx}d}  "
-            f"{got_vals[i]:>{w_ev}.16e}  "
-            f"{ref_vals[i]:>{w_ev}.16e}  "
-            f"{drel:>{w_drel}.3e}  "
-            f"{got_res[i]:>{w_res}.3e}  "
-        )
-    print("")
-
-def _banner(title: str) -> None:
-    w = 78
-    t = f" {title.strip()} "
-    if len(t) >= w:
-        print(t)
-        return
-    left = (w - len(t)) // 2
-    right = w - len(t) - left
-    print("=" * left + t + "=" * right)
-
-def _print_kv(key: str, value: str) -> None:
-    key_w = 16
-    print(f"{key:<{key_w}}: {value}")
-
-def _which_pretty(which: str) -> str:
-    w = which.upper()
-    if w == "SR":
-        return "Smallest"
-    if w == "LR":
-        return "Largest"
-    if w == "SAI":
-        return "Nearest shift (SAI)"
-    return which
+def launch_settings(backend: str, profile: str, launcher: str, threads: int | None,
+                    environ=None, hostname=None):
+    env = dict(os.environ if environ is None else environ)
+    host = socket.gethostname() if hostname is None else hostname
+    if profile == "auto":
+        profile = "perlmutter" if (env.get("NERSC_HOST", "").lower() == "perlmutter"
+                                   or host.startswith("perlmutter")) else "local"
+    gpu = backend == "CUDA"
+    count = threads or (16 if gpu else 64)
+    if profile == "perlmutter":
+        env.update(OMP_NUM_THREADS=str(count), MKL_NUM_THREADS=str(count),
+                   OMP_PLACES="cores", OMP_PROC_BIND="close" if gpu else "spread",
+                   OMP_DYNAMIC="false", MKL_DYNAMIC="false")
+    elif threads:
+        env.update(OMP_NUM_THREADS=str(threads), MKL_NUM_THREADS=str(threads))
+    inside_step = env.get("SLURM_STEP_ID", "").isdigit()
+    if launcher == "auto":
+        launcher = "srun" if profile == "perlmutter" and not inside_step else "direct"
+    prefix = []
+    if launcher == "srun":
+        prefix = ["srun", "--immediate=5"]
+        if not gpu:
+            prefix += ["-N", "1"]
+        prefix += ["-n", "1", "-c", str(count)]
+        if gpu:
+            prefix += ["--gpus-per-task=1", "--gpu-bind=single:1"]
+        prefix += ["--cpu-bind=cores"]
+    return profile, prefix, env
 
 
-def _select_ref_values(*, ref_path: Path, which: str, k: int, shift: float = 0.0) -> List[float]:
-    spec = parse_scalapack_output(ref_path)
-    w = which.upper()
-    if w == "SR":
-        return spec.smallest(k)
-    if w == "LR":
-        return spec.largest(k)
-    if w == "SM":
-        return sorted(spec.eigenvalues, key=abs)[:k]
-    if w == "LM":
-        return sorted(spec.eigenvalues, key=abs, reverse=True)[:k]
-    if w == "BE":
-        ordered = sorted(spec.eigenvalues)
-        both = []
-        lo, hi = 0, len(ordered) - 1
-        while lo <= hi:
-            both.append(ordered[hi])
-            hi -= 1
-            if lo <= hi:
-                both.append(ordered[lo])
-                lo += 1
-        return both[:k]
-    if w == "SAI":
-        # SAI returns the k nearest eigenvalues in ascending algebraic order.
-        return sorted(sorted(spec.eigenvalues, key=lambda value: abs(value - shift))[:k])
-    raise ValueError(f"Unsupported which for reference test: {which} (use SR, LR, SM, LM, BE, or SAI)")
+class Runner:
+    def __init__(self, args):
+        self.args = args
+        self.exe = resolve_executable(args.runfasteig)
+        result = subprocess.run([str(self.exe), "--backend"], capture_output=True,
+                                text=True, timeout=30)
+        self.backend = result.stdout.strip()
+        if result.returncode != 0 or self.backend not in ("CPU", "CUDA"):
+            raise RuntimeError("The test driver must support --backend; rebuild the examples.\n"
+                               + result.stdout + result.stderr)
+        result = subprocess.run([str(self.exe), "--build-info"], capture_output=True,
+                                text=True, timeout=30)
+        if result.returncode != 0:
+            raise RuntimeError("Cannot read executable build information: " + result.stderr)
+        self.cudss = any(line.strip().startswith("cuDSS") and line.split(":")[-1].strip() == "Yes"
+                         for line in result.stdout.splitlines())
+        self.profile, self.prefix, self.env = launch_settings(
+            self.backend, args.profile, args.launcher, args.threads)
+        self.checked = False
+        self.unavailable = None
+
+    def command(self, argument):
+        return self.prefix + [str(self.exe), str(argument)]
+
+    def describe(self, argument):
+        keys = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OMP_PLACES", "OMP_PROC_BIND",
+                "OMP_DYNAMIC", "MKL_DYNAMIC")
+        settings = " ".join(f"{key}={self.env[key]}" for key in keys if key in self.env)
+        return f"{settings} {shlex.join(self.command(argument))}".strip()
+
+    def check_runtime(self):
+        if self.checked:
+            if self.unavailable:
+                raise Unavailable(self.unavailable)
+            return
+        if (self.profile == "perlmutter" or self.prefix) and not self.env.get("SLURM_JOB_ID"):
+            self.unavailable = "An existing Slurm allocation is required; run inside salloc/sbatch."
+        if self.profile == "perlmutter" and not self.prefix and self.env.get("SLURM_STEP_ID", "").isdigit():
+            allocated = self.env.get("SLURM_CPUS_PER_TASK", "")
+            required = int(self.env["OMP_NUM_THREADS"])
+            if allocated.isdigit() and int(allocated) < required:
+                self.unavailable = (f"The current Slurm step has {allocated} CPUs per task; "
+                                    f"this profile needs {required}. Use a larger step or --threads.")
+        if not self.unavailable and self.backend == "CUDA" and self.prefix:
+            allocation = subprocess.run(
+                ["scontrol", "show", "job", self.env["SLURM_JOB_ID"], "-o"],
+                env=self.env, capture_output=True, text=True, timeout=30)
+            resources = re.search(r"\bAllocTRES=(\S+)", allocation.stdout)
+            if allocation.returncode == 0 and resources:
+                gpu_counts = re.findall(r"gres/gpu(?::[^=,]+)?=(\d+)", resources.group(1))
+                if not any(int(count) > 0 for count in gpu_counts):
+                    self.unavailable = "The current Slurm allocation has no allocated GPUs."
+        if self.unavailable:
+            self.checked = True
+            raise Unavailable(self.unavailable)
+        if self.backend == "CUDA":
+            result = subprocess.run(self.command("--check-runtime"), env=self.env,
+                                    capture_output=True, text=True, timeout=90)
+            if result.returncode == SKIP_CODE:
+                self.unavailable = result.stdout.strip() or result.stderr.strip() or "CUDA runtime is unavailable."
+                self.checked = True
+                raise Unavailable(self.unavailable)
+            if result.returncode:
+                raise RuntimeError("CUDA runtime probe failed in the selected launch context:\n"
+                                   + result.stdout + result.stderr)
+        self.checked = True
+
+    def run(self, input_path, directory):
+        self.check_runtime()
+        return subprocess.run(self.command(input_path), cwd=directory, env=self.env,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, timeout=self.args.timeout)
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Compare FASTEIG with ScaLAPACK reference eigenvalues on a MatrixMarket matrix.")
-    ap.add_argument("--solver", required=True, help="Solver name (e.g., Lanczos, KrylovSchur)")
-    ap.add_argument("--which", required=True, choices=["SR", "LR", "SM", "LM", "BE", "SAI"], help="Spectrum selection; SAI targets eigenvalues nearest --shift")
-    ap.add_argument("--shift", type=float, default=0.0, help="Shift for SAI (default: 0)")
-    ap.add_argument("--matrix", default="SiO", help="Matrix alias (e.g., SiO) or path to .mtx")
-    ap.add_argument("--bmatrix", default="", help="SPD B matrix for a generalized Krylov solver; requires an explicit --ref-file for (A,B)")
-    ap.add_argument(
-        "--ref-file",
-        default="",
-        help="Reference eigenvalue file (ScaLAPACK output). Default: tests/reference/<matrix>.out.121mpi",
-    )
+def select_reference(values, which, count, shift):
+    ordered = sorted(values)
+    if which == "SR":
+        return ordered[:count]
+    if which == "LR":
+        return ordered[::-1][:count]
+    if which == "SM":
+        return sorted(ordered, key=abs)[:count]
+    if which == "LM":
+        return sorted(ordered, key=abs, reverse=True)[:count]
+    if which == "BE":
+        return [ordered[-1 - index // 2] if index % 2 == 0 else ordered[index // 2]
+                for index in range(count)]
+    if which == "SAI":
+        return sorted(sorted(ordered, key=lambda value: abs(value - shift))[:count])
+    raise ValueError(f"Unknown selection {which}")
 
-    ap.add_argument("--k", type=int, default=5, help="Number of eigenvalues to compare (default: 5)")
-    ap.add_argument("--fasteig-tol", type=float, default=1e-14, help="FASTEIG solver tolerance (default: 1e-14)")
-    ap.add_argument("--check-tol", type=float, default=1e-10, help="Assertion tolerance for residual norms (default: 1e-10)")
-    ap.add_argument("--maxiter", type=int, default=2000, help="FASTEIG maxiter (default: 2000)")
-    ap.add_argument("--seed", type=int, default=1, help="Random seed passed to FASTEIG (default: 1)")
-    ap.add_argument("--blksize", type=int, help="BlockLanczos/BlockKrylovSchur block width (otherwise use the input parser default)")
-    ap.add_argument("--maxdim", type=int, help="Maximum restarted subspace dimension (otherwise use the input parser default)")
 
-    ap.add_argument("--print-every", type=int, default=0, help="print_every in FASTEIG input (0 disables)")
-    ap.add_argument("--verbosity", type=int, default=1, choices=[1, 2], help="Verbosity for FASTEIG stdout")
+def input_deck(args, problem, solver, which, dimension):
+    iterations = min(args.maxiter, dimension) if solver == "Lanczos" else args.maxiter
+    lines = [f"amatrix {problem.matrix}", "logfile results", "output_format text",
+             f"solver {solver}", f"which {which}", f"nev {args.k}",
+             f"tol {args.fasteig_tol:.17g}", f"maxiter {iterations}", f"seed {args.seed}",
+             f"verbosity {args.verbosity}", f"print_every {args.print_every}"]
+    if iterations != args.maxiter:
+        print(f"Lanczos maxiter capped at matrix dimension: {iterations}")
+    if problem.bmatrix is not None:
+        lines.append(f"bmatrix {problem.bmatrix}")
+    if solver in BLOCK_SOLVERS:
+        if args.blksize > dimension:
+            raise ValueError("--blksize exceeds the matrix dimension")
+        lines.append(f"blksize {args.blksize}")
+    if solver in RESTARTED_SOLVERS:
+        lines.append(f"maxdim {min(args.maxdim, dimension)}")
+    if which == "SAI":
+        lines.append(f"shift {problem.shift:.17g}")
+    return "\n".join(lines) + "\n"
 
-    ap.add_argument("--eig-atol", type=float, default=1e-10, help="Absolute eigenvalue tolerance (default: 1e-10)")
-    ap.add_argument("--eig-rtol", type=float, default=1e-10, help="Relative eigenvalue tolerance (default: 1e-10)")
 
-    ap.add_argument(
-        "--runfasteig",
-        default="",
-        help="Path/name of FASTEIG executable. Default: auto-detect examples/runfasteig, then examples/runfasteig_cpu.",
-    )
-    ap.add_argument("--keep-tmp", action="store_true", help="Keep temporary test directory for debugging.")
-    ap.add_argument("--traceback", action="store_true", help="On failure, print a Python traceback (default: off).")
+def compare(results, reference, args):
+    if len(results.eigenvalues) != args.k or len(results.residual_norms) != args.k:
+        raise ValueError(f"Expected {args.k} eigenvalues AND residuals; got "
+                         f"{len(results.eigenvalues)} and {len(results.residual_norms)}")
+    failures = []
+    print(f"{'Index':>5}  {'FASTEIG Eigenvalue':>24}  {'Ref Eigenvalue':>24}  {'RelΔ':>10}  {'FASTEIG Residual':>16}")
+    for index, (got, expected, residual) in enumerate(zip(results.eigenvalues, reference,
+                                                         results.residual_norms), start=1):
+        relative = abs(got - expected) / (1.0 + abs(expected))
+        print(f"{index:5d}  {got:24.16e}  {expected:24.16e}  {relative:10.3e}  {residual:16.3e}")
+        if not math.isfinite(residual) or residual < 0 or residual > args.check_tol:
+            failures.append(f"index {index}: residual {residual:.3e} exceeds check_tol {args.check_tol:.3e} or is invalid")
+        if not math.isfinite(got) or abs(got - expected) > args.eig_atol + args.eig_rtol * abs(expected):
+            failures.append(f"index {index}: eigenvalue RelΔ={relative:.3e} fails atol + rtol*|ref|")
+    return failures
 
-    args = ap.parse_args()
-    if args.bmatrix:
-        if args.solver not in ("Lanczos", "BlockLanczos", "KrylovSchur", "BlockKrylovSchur") or not args.ref_file:
-            ap.error("--bmatrix requires a Krylov solver and an explicit generalized --ref-file")
-        if args.which == "SAI" and args.solver != "KrylovSchur":
-            ap.error("generalized SAI is currently supported only by KrylovSchur")
-    if args.k <= 0:
-        ap.error("--k must be positive")
-    if not math.isfinite(args.shift):
-        ap.error("--shift must be finite")
-    if args.blksize is not None and args.blksize <= 0:
-        ap.error("--blksize must be positive")
-    if args.maxdim is not None and args.maxdim <= 0:
-        ap.error("--maxdim must be positive")
 
-    repo_root = Path(__file__).resolve().parents[2]
-    matrix_path = resolve_matrix_arg(args.matrix)
-    bmatrix_path = resolve_matrix_arg(args.bmatrix) if args.bmatrix else None
-    if bmatrix_path is not None and not bmatrix_path.exists():
-        raise RuntimeError(f"B matrix not found: {bmatrix_path}")
-    fasteig_exe = _resolve_fasteig_exe(repo_root, args.runfasteig)
-    ref_path = (Path(args.ref_file).expanduser().resolve() if args.ref_file else default_ref_path_for_matrix(matrix_path))
-
-    if not matrix_path.exists():
-        raise RuntimeError(f"Matrix not found: {matrix_path}")
-    if not ref_path.exists():
-        raise RuntimeError(f"Reference file not found: {ref_path}")
-
-    _banner("TEST CASE")
-    _print_kv("Solver", args.solver)
-    _print_kv("Which", _which_pretty(args.which))
-    if args.which == "SAI":
-        _print_kv("Shift", f"{args.shift:g}")
-    if args.blksize is not None:
-        _print_kv("Block size", str(args.blksize))
-    if args.maxdim is not None:
-        _print_kv("Max subspace dim", str(args.maxdim))
-    _print_kv("Matrix", f"{args.matrix}  ({matrix_path})")
-    if bmatrix_path is not None:
-        _print_kv("B matrix", str(bmatrix_path))
-    _print_kv("Ref file", str(ref_path))
-    _print_kv("k", str(args.k))
-    _print_kv("FASTEIG tol", f"{args.fasteig_tol:g}")
-    _print_kv("Check tol", f"{args.check_tol:g}")
-    if args.eig_atol == args.eig_rtol and args.eig_atol == args.check_tol:
-        _print_kv("Eigenvalue tol", f"{args.check_tol:g}")
-    else:
-        _print_kv("Eigenvalue atol", f"{args.eig_atol:g}")
-        _print_kv("Eigenvalue rtol", f"{args.eig_rtol:g}")
-    _print_kv("FASTEIG maxiter", str(args.maxiter))
-    _print_kv("FASTEIG exe", str(fasteig_exe))
-    print("")
-
-    _banner("REFERENCE (ScaLAPACK)")
-    print("Loading reference eigenvalues...")
-    ref_vals = _select_ref_values(ref_path=ref_path, which=args.which, k=args.k, shift=args.shift)
-    print(f"Reference loaded  : {len(ref_vals)} values used (of full spectrum in {ref_path.name})")
-    print("")
-
-    # Run fasteig in a temp dir (keeps logs isolated).
-    if args.keep_tmp:
-        td_path = Path(tempfile.mkdtemp(prefix="fasteig_test_"))
-        print(f"[INFO] Keeping temp dir: {td_path}")
-        cleanup = None
-    else:
-        tmp_ctx = tempfile.TemporaryDirectory(prefix="fasteig_test_")
-        td_path = Path(tmp_ctx.name)
-        cleanup = tmp_ctx.cleanup
-
+def run_case(args, problem, dimension, spectrum, solver, which, runner, directory):
+    print(f"\n{'=' * 18} {problem.name} / {solver} / {which} {'=' * 18}", flush=True)
+    reason = unsupported_reason(solver, which, problem.bmatrix is not None)
+    if reason:
+        print(f"[SKIP: unsupported] {reason}")
+        return "SKIP"
     try:
-        stem = matrix_path.stem if matrix_path.suffix.lower() == ".mtx" else "matrix"
-        logprefix = td_path / stem
+        directory.mkdir(parents=True)
+        deck = input_deck(args, problem, solver, which, dimension)
+        input_path = directory / "case.input"
+        input_path.write_text(deck)
+        print("Command:", runner.describe(input_path), flush=True)
+        if args.dry_run:
+            print(deck.rstrip())
+            print("[PLANNED]")
+            return "PLANNED"
+        if runner.backend == "CUDA" and not runner.cudss and (which == "SAI" or problem.bmatrix):
+            raise Unavailable("This GPU case requires a build with cuDSS enabled.")
+        reference = select_reference(spectrum, which, args.k, problem.shift)
+        output = runner.run(input_path, directory)
+        (directory / "stdout.txt").write_text(output.stdout)
+        failures = []
+        if output.returncode:
+            failures.append(f"Executable returned {output.returncode}")
+        try:
+            results = parse_final_results(directory / f"results_{solver}.log")
+            print(f"Iterations      : {results.iterations}\nRuntime (sec)   : {results.runtime_sec}")
+            failures.extend(compare(results, reference, args))
+        except (OSError, ValueError) as error:
+            failures.append(str(error))
+        if failures:
+            print(output.stdout)
+            print("[FAIL]\n  " + "\n  ".join(failures))
+            return "FAIL"
+        print("[PASS]")
+        return "PASS"
+    except subprocess.TimeoutExpired as error:
+        output = error.stdout or ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        (directory / "stdout.txt").write_text(output)
+        print(f"[FAIL] Solver/probe timed out after {error.timeout} seconds")
+        return "FAIL"
+    except Unavailable as error:
+        status = "SKIP" if args.allow_unavailable else "FAIL"
+        print(f"[{status}: unavailable] {error}")
+        return status
+    except Exception as error:
+        print(f"[FAIL] {error}")
+        if args.traceback:
+            traceback.print_exc()
+        return "FAIL"
 
-        extra_options = []
-        if bmatrix_path is not None:
-            extra_options.append(f"bmatrix {bmatrix_path}")
-        if args.which == "SAI":
-            extra_options.append(f"shift {args.shift}")
-        if args.blksize is not None:
-            extra_options.append(f"blksize {args.blksize}")
-        if args.maxdim is not None:
-            extra_options.append(f"maxdim {args.maxdim}")
-        input_txt = "\n".join(
-            [
-                f"amatrix {matrix_path}",
-                f"logfile {logprefix}",
-                "output_format text",
-                f"seed {args.seed}",
-                f"solver {args.solver}",
-                f"which {args.which}",
-                f"nev {args.k}",
-                f"maxiter {args.maxiter}",
-                f"tol {args.fasteig_tol}",
-                f"verbosity {args.verbosity}",
-                f"print_every {args.print_every}",
-                *extra_options,
-                "",
-            ]
-        )
-        input_path = td_path / f"{stem}_test.input"
-        input_path.write_text(input_txt, encoding="utf-8")
 
-        _banner("FASTEIG")
-        print("Running...")
-        _run_fasteig(fasteig_exe, input_path, cwd=repo_root)
-        print("Finished.")
+def load_problem(args, argument_parser):
+    for name in ("k", "maxiter", "blksize", "maxdim", "timeout", "fasteig_tol", "check_tol"):
+        value = getattr(args, name)
+        if not math.isfinite(value) or value <= 0:
+            argument_parser.error(f"--{name.replace('_', '-')} must be finite and positive")
+    if any(not math.isfinite(value) or value < 0 for value in (args.eig_atol, args.eig_rtol)):
+        argument_parser.error("Eigenvalue tolerances must be finite and nonnegative")
+    if args.threads is not None and args.threads <= 0:
+        argument_parser.error("--threads must be positive")
+    if args.seed < 0 or args.seed > 2**31 - 1 or args.print_every < 0:
+        argument_parser.error("--seed must fit a nonnegative int32 and --print-every must be nonnegative")
+    problem = resolve_problem(args.matrix, args.bmatrix, args.ref_file, args.shift)
+    dimension = matrix_dimension(problem.matrix)
+    if problem.bmatrix and matrix_dimension(problem.bmatrix) != dimension:
+        raise ValueError("A and B dimensions differ")
+    if args.k > dimension or not math.isfinite(problem.shift):
+        raise ValueError("Invalid eigenpair count or shift")
+    spectrum = parse_reference_spectrum(problem.reference).eigenvalues
+    if len(spectrum) != dimension:
+        raise ValueError(f"Expected a FULL spectrum of {dimension} eigenvalues; found {len(spectrum)}")
+    return problem, dimension, spectrum
 
-        log_path = Path(f"{logprefix}_{args.solver}.log")
-        if not log_path.exists():
-            raise RuntimeError(f"Expected log file not found: {log_path}")
 
-        print("Reading log...")
-        results = parse_final_results(log_path)
-        got_vals = results.eigenvalues[: args.k]
-        got_res = results.residual_norms[: args.k]
+def print_configuration(args, problem, runner):
+    print(f"Problem         : {problem.name} ({'generalized' if problem.bmatrix else 'standard'})")
+    print(f"A matrix        : {problem.matrix}\nB matrix        : {problem.bmatrix or 'Identity'}")
+    print(f"Reference       : {problem.reference}\nBackend         : {runner.backend}")
+    print(f"FASTEIG tol     : {args.fasteig_tol}\nCheck tol       : {args.check_tol}")
+    print(f"Eigenvalue atol : {args.eig_atol}\nEigenvalue rtol : {args.eig_rtol}")
+    print(f"Maxiter         : {args.maxiter}\nk / seed        : {args.k} / {args.seed}")
 
-        print("")
-        _banner("FASTEIG DIAGNOSTICS")
-        _print_kv("Iterations", str(results.iterations) if results.iterations is not None else "n/a")
-        _print_kv(
-            "Runtime (sec)",
-            f"{results.runtime_sec:.6f}" if results.runtime_sec is not None else "n/a",
-        )
 
-        if len(got_vals) != args.k:
-            raise RuntimeError(f"Expected {args.k} eigenvalues, got {len(got_vals)}")
-        if len(ref_vals) != args.k:
-            raise RuntimeError(f"Reference returned {len(ref_vals)} eigenvalues, expected {args.k}.")
-
-        _banner("COMPARISON")
-        _print_comparison_table(got_vals=got_vals, got_res=got_res, ref_vals=ref_vals)
-
-        _banner("CHECKS")
-        print("Checking residuals...")
-        bad = [(i, r) for i, r in enumerate(got_res, start=1) if not (r <= args.check_tol)]
-        if bad:
-            msg = "\n".join([f"  index {i}: residual {r:.3e} > check_tol {args.check_tol:.3e}" for i, r in bad])
-            raise RuntimeError(f"Residual norms exceed tolerance:\n{msg}")
-
-        print("Checking eigenvalues...")
-        eig_bad, max_abs, max_rel, max_allow = _eig_error_rows(
-            got_vals=got_vals,
-            ref_vals=ref_vals,
-            atol=args.eig_atol,
-            rtol=args.eig_rtol,
-        )
-        if eig_bad:
-            msg = "\n".join([f"  index {i}: RelΔ={drel:.3e} > allowed RelΔ {allow_rel:.3e}" for i, drel, allow_rel in eig_bad])
-            raise RuntimeError(
-                "Eigenvalues differ from reference.\n"
-                f"{msg}\n"
-                f"  max RelΔ = {max_rel:.3e}\n"
-            )
+def main():
+    parser = argument_parser("Check one FASTEIG case against a full reference spectrum.")
+    parser.add_argument("--solver", choices=SOLVERS, required=True, help="Solver to test")
+    parser.add_argument("--which", choices=SELECTIONS, type=str.upper, default="SR",
+                        help="Spectrum selection")
+    args = parser.parse_args()
+    problem, dimension, spectrum = load_problem(args, parser)
+    runner = Runner(args)
+    print_configuration(args, problem, runner)
+    root = Path(tempfile.mkdtemp(prefix="fasteig-tests-"))
+    try:
+        status = run_case(args, problem, dimension, spectrum, args.solver, args.which,
+                          runner, root / f"{args.solver}_{args.which}")
     finally:
-        if cleanup is not None:
-            cleanup()
-
-    _banner("PASS")
-    print(f"solver={args.solver} which={args.which} matrix={args.matrix} k={args.k}")
-    return 0
+        if args.keep_tmp:
+            print(f"Artifacts       : {root}")
+        else:
+            shutil.rmtree(root)
+    if status == "FAIL":
+        return 2
+    return SKIP_CODE if status == "SKIP" else 0
 
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(main())
-    except SystemExit:
-        raise
-    except Exception as e:
-        print(f"[FAIL] {e}", file=sys.stderr)
+        sys.exit(main())
+    except Exception as error:
+        print(f"[FAIL] {error}", file=sys.stderr)
         if "--traceback" in sys.argv:
-            raise
-        raise SystemExit(2)
+            traceback.print_exc()
+        sys.exit(2)
 

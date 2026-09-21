@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import math
 import re
 from typing import List
 
@@ -27,13 +28,13 @@ class ReferenceSpectrum:
         return sorted(self.eigenvalues, reverse=True)[:k]
 
 
-def parse_scalapack_output(path: str | Path) -> ReferenceSpectrum:
+def parse_reference_spectrum(path: str | Path) -> ReferenceSpectrum:
     """
-    Parse a ScaLAPACK output file containing lines like:
+    Parse a full spectrum in ScaLAPACK/MATLAB indexed form:
       ev( i ) = <value>
 
-    Returns the full spectrum as a list of floats. Ordering in the file may
-    vary; consumers should sort as needed.
+    A plain text file with one floating-point value per line is also accepted.
+    Consumers sort the full spectrum according to the requested selection.
     """
     p = Path(path)
     txt = p.read_text(encoding="utf-8", errors="replace")
@@ -45,18 +46,29 @@ def parse_scalapack_output(path: str | Path) -> ReferenceSpectrum:
             continue
         i = int(m.group(1))
         v_txt = m.group(2).replace("D", "E").replace("d", "e")
+        if i in by_i:
+            raise ValueError(f"Duplicate eigenvalue index {i} in {p}")
         by_i[i] = float(v_txt)
 
     if not by_i:
-        raise ValueError(f"No 'ev(i) =' lines found in reference file: {p}")
+        vals = [float(line.strip().replace("D", "E").replace("d", "e"))
+                for line in txt.splitlines() if line.strip()]
+        if not vals or not all(math.isfinite(value) for value in vals):
+            raise ValueError(f"Empty or nonfinite reference spectrum: {p}")
+        return ReferenceSpectrum(eigenvalues=vals)
 
     # If indices look 1..N contiguous, preserve that; otherwise just return values.
     keys = sorted(by_i.keys())
     if keys and keys[0] == 1 and keys[-1] == len(keys):
         vals = [by_i[i] for i in range(1, len(keys) + 1)]
     else:
-        vals = [by_i[i] for i in keys]
+        raise ValueError(f"Reference indices must be contiguous, starting at 1: {p}")
+    if not all(math.isfinite(value) for value in vals):
+        raise ValueError(f"Nonfinite reference eigenvalues: {p}")
     return ReferenceSpectrum(eigenvalues=vals)
+
+
+parse_scalapack_output = parse_reference_spectrum
 
 
 def default_ref_path_for_matrix(matrix_path: Path) -> Path:

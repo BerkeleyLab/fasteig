@@ -183,17 +183,18 @@ FASTEIG_INT ChebyshevSolver::solve() {
     }
     vectors->copy_columns_from(0, *ritz_vectors, 0, subspace_cols);
 
-    // 4. Lock requested pairs in spectral order. Each lock activates one spare
-    // when available; locked columns still participate in QR/Rayleigh--Ritz.
+    // 4. Recheck the converged prefix after every QR/Rayleigh--Ritz rotation.
+    // Reactivate from the first unconverged pair and retain any expanded space.
+    locked = 0;
     while (locked < nev && ritz.relative_residuals(locked) <= tol) {
       ++locked;
-      if (subspace_cols < capacity) ++subspace_cols;
     }
+    subspace_cols = std::max(subspace_cols, nev + std::min(locked, capacity - nev));
     it_done = static_cast<long long>(iter + 1);
 
     // 5. Report original eigenvalues and the same relative residual definition
     // used by the final results. Convergence is checked every filter cycle.
-    const bool converged = locked == nev;
+    const bool converged = ritz.relative_residuals.head(nev).maxCoeff() <= tol;
     const bool progress_due = print_every > 0 &&
         ((iter + 1) % print_every == 0 || converged || iter + 1 == maxiter);
     if (progress_due) {
