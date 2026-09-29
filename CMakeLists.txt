@@ -43,10 +43,29 @@ set(PLAT "Generic" CACHE STRING "Platform name (e.g., Perlmutter, Frontier, spac
 # ------------------------------------------------------------------------------
 option(USE_MKL        "Use Intel MKL for BLAS/LAPACK"             OFF)
 option(USE_LIBSCI     "Use Cray LibSci for BLAS/LAPACK"           OFF)
-option(ENABLE_CUDA    "Build the NVIDIA GPU backend (src/gpu)"    OFF)
 option(USE_CUDSS      "Use the NVIDIA cuDSS sparse direct solver" ON)
 option(BUILD_EXAMPLES "Build example programs"                    ON)
 option(BUILD_TESTS    "Build and enable tests"                    OFF)
+
+if(NOT DEFINED ENABLE_CUDA)
+    if(BUILD_TESTS)
+        set(ENABLE_CUDA AUTO)
+    else()
+        set(ENABLE_CUDA OFF)
+    endif()
+endif()
+set(ENABLE_CUDA "${ENABLE_CUDA}" CACHE STRING "Build CUDA backend: AUTO, ON, or OFF")
+set_property(CACHE ENABLE_CUDA PROPERTY STRINGS AUTO ON OFF)
+if(ENABLE_CUDA STREQUAL "AUTO")
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(CMAKE_CUDA_COMPILER)
+        set(ENABLE_CUDA ON)
+    else()
+        set(ENABLE_CUDA OFF)
+    endif()
+    message(STATUS "CUDA auto-detection: ${ENABLE_CUDA}")
+endif()
 
 # Package managers (Spack, EasyBuild, distro builds) inject their own -march and
 # expect to control the target microarchitecture. Turn this off for those builds.
@@ -63,7 +82,7 @@ endif()
 
 if(BUILD_TESTS AND NOT BUILD_EXAMPLES)
     message(FATAL_ERROR
-        "BUILD_TESTS=ON requires BUILD_EXAMPLES=ON (runfasteig is the test driver).")
+        "BUILD_TESTS=ON requires BUILD_EXAMPLES=ON (runfasteig_cpu is the test driver).")
 endif()
 
 if(ENABLE_CUDA AND NOT EXISTS "${CMAKE_SOURCE_DIR}/src/gpu/CMakeLists.txt")
@@ -98,18 +117,14 @@ if(ENABLE_CUDA)
         endif()
     endif()
 
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND "$ENV{CUDAARCHS}" STREQUAL "" AND
+       (PLAT STREQUAL "Perlmutter" OR "$ENV{NERSC_HOST}" STREQUAL "perlmutter"))
+        set(CMAKE_CUDA_ARCHITECTURES 80 CACHE STRING "CUDA architectures")
+    endif()
     enable_language(CUDA)
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_EXTENSIONS OFF)
-
-    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-        if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
-            set(CMAKE_CUDA_ARCHITECTURES native)
-        else()
-            set(CMAKE_CUDA_ARCHITECTURES 70 80 90)
-        endif()
-    endif()
 
     find_package(CUDAToolkit REQUIRED)
 
@@ -618,11 +633,11 @@ if(ENABLE_CUDA)
         CUDA::cublas
         CUDA::cusparse
         CUDA::cusolver)
-    target_compile_definitions(fasteig_gpu_deps INTERFACE FASTEIG_USE_CUDA)
+    target_compile_definitions(fasteig_gpu_deps INTERFACE USE_CUDA)
 
     if(USE_CUDSS)
         target_link_libraries(fasteig_gpu_deps INTERFACE ${CUDSS_TARGET})
-        target_compile_definitions(fasteig_gpu_deps INTERFACE FASTEIG_USE_CUDSS)
+        target_compile_definitions(fasteig_gpu_deps INTERFACE USE_CUDSS)
     endif()
 endif()
 
@@ -847,9 +862,11 @@ install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/
         PATTERN "*.hh"
         PATTERN "*.cuh")
 
-if(BUILD_EXAMPLES AND TARGET runfasteig)
-    install(TARGETS runfasteig RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-endif()
+foreach(driver runfasteig_cpu runfasteig_gpu)
+    if(TARGET ${driver})
+        install(TARGETS ${driver} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    endif()
+endforeach()
 
 # A bundled OpenBLAS is a build artifact of this project, so it must be installed
 # alongside the library or downstream links will fail.
@@ -865,9 +882,9 @@ endif()
 # makes export() fail outright.
 set(FE_EXPORT_DEFS "${MATH_COMPILE_DEFINITIONS}")
 if(ENABLE_CUDA)
-    list(APPEND FE_EXPORT_DEFS FASTEIG_USE_CUDA)
+    list(APPEND FE_EXPORT_DEFS USE_CUDA)
     if(USE_CUDSS)
-        list(APPEND FE_EXPORT_DEFS FASTEIG_USE_CUDSS)
+        list(APPEND FE_EXPORT_DEFS USE_CUDSS)
     endif()
 endif()
 
