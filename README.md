@@ -28,6 +28,8 @@ the library for other projects to consume.
 - [Version and build information](#version-and-build-information)
 - [AI-Assisted Development Notice]
 - [Scope of usage]
+- [Human oversight and verification]
+- [Reliability]
 - [Support](#support)
 
 ---
