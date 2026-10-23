@@ -26,6 +26,8 @@ the library for other projects to consume.
   - [Input file format](#input-file-format)
   - [Solver and backend support](#solver-and-backend-support)
 - [Version and build information](#version-and-build-information)
+- [AI-Assisted Development Notice]
+- [Scope of usage]
 - [Support](#support)
 
 ---
