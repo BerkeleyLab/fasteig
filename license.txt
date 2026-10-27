@@ -4,7 +4,7 @@ FAST Eigensolver (FASTEig) Copyright (c) 2026, The Regents of the University of 
 through Lawrence Berkeley National Laboratory (subject to receipt of
 any required approvals from the U.S. Dept. of Energy). All rights reserved.
 
-Portions [REASONABLY SPECIFY THE PORTION OF THE CODEBASE IF IT IS EASY TO DO SO AND YOU WISH TO DO SO] of this codebase were generated using artificial intelligence tools, specifically [INSERT NAMES OF AI AGENTS/TOOLS USED, e.g. Claude, ChatGPT, etc]. All AI-generated code has been [manually] reviewed, tested, and integrated [by human software developers] to ensure quality and security [DESCRIBE PROCESS]. [INCLUDE THE PREVIOUS SENTENCE OR MODIFY TO DOCUMENT OR DESCRIBE PROCESS OR LEVEL OF REVIEW, TESTING AND INTEGRATION.]
+Portions of this codebase were generated using artificial intelligence tools, specifically Codex. All AI-generated code has been manually reviewed, tested, and integrated by human software developers to ensure quality and security.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
